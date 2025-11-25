@@ -196,10 +196,10 @@ async def testpay(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # додаємо в канал
-        await telegram_app.bot.add_chat_member(
-            chat_id=CHANNEL_ID,
-            user_id=user_id
-        )
+        await telegram_app.bot.add_chat_members(
+    chat_id=CHANNEL_ID,
+    user_ids=[telegram_id]
+)
 
         await telegram_app.bot.send_message(
             chat_id=user_id,
@@ -264,7 +264,10 @@ async def wayforpay_callback(request: Request):
         paid_users.add(telegram_id)
 
         try:
-            await telegram_app.bot.add_chat_member(CHANNEL_ID, telegram_id)
+            await telegram_app.bot.add_chat_members(
+    chat_id=CHANNEL_ID,
+    user_ids=[user_id]
+)
             await telegram_app.bot.send_message(
                 telegram_id,
                 "Оплата успішна! 🎉\nТи доданий у канал з уроками."
