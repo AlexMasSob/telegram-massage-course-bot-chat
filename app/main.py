@@ -41,6 +41,11 @@ pending_orders = {}  # orderReference -> telegram_id
 paid_users = set()
 
 telegram_app = Application.builder().token(BOT_TOKEN).build()
+# Ініціалізація Telegram Application при старті сервера
+@app.on_event("startup")
+async def startup_event():
+    await telegram_app.initialize()
+    await telegram_app.start()
 
 
 # ===================== SIGNATURE HELPERS =====================
