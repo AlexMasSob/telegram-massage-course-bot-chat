@@ -198,7 +198,7 @@ async def testpay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # додаємо в канал
         await telegram_app.bot.add_chat_members(
     chat_id=CHANNEL_ID,
-    user_ids=[telegram_id]
+    user_ids=[user_id]
 )
 
         await telegram_app.bot.send_message(
@@ -266,7 +266,7 @@ async def wayforpay_callback(request: Request):
         try:
             await telegram_app.bot.add_chat_members(
     chat_id=CHANNEL_ID,
-    user_ids=[user_id]
+    user_ids=[telegram_id]
 )
             await telegram_app.bot.send_message(
                 telegram_id,
