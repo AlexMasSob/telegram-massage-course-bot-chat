@@ -120,9 +120,14 @@ def wfp_response_signature(order_ref: str, status: str, timestamp: int) -> str:
 # ===================== TELEGRAM HANDLERS =====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("💳 Оплатити курс", callback_data="pay")]]
-    )
+    keyboard = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("💳 Оплатити курс", callback_data="pay")
+    ],
+    [
+        InlineKeyboardButton("🧪 Тестова оплата", callback_data="testpay")
+    ]
+])
 
     txt = (
         "Привіт! 👋\n\n"
@@ -183,9 +188,43 @@ async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.message.reply_text(txt)
 
+async def testpay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+
+    try:
+        # додаємо в канал
+        await telegram_app.bot.add_chat_member(
+            chat_id=CHANNEL_ID,
+            user_id=user_id
+        )
+
+        await telegram_app.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "🧪 *Тестова оплата успішна!*\n\n"
+                "Тебе додано в приватний канал з уроками 🎉\n"
+                "Тепер перевір канал у списку твоїх чатів."
+            ),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await query.message.reply_text(
+            f"Помилка при додаванні в канал:\n`{e}`",
+            parse_mode="Markdown"
+        )
+        return
+
+    await query.message.reply_text(
+        "Готово! Ти доданий у канал. 🎉"
+    )
+
 
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CallbackQueryHandler(pay, pattern="^pay$"))
+telegram_app.add_handler(CallbackQueryHandler(testpay, pattern="^testpay$"))
 
 
 # ===================== TELEGRAM WEBHOOK =====================
