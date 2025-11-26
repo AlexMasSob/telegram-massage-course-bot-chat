@@ -24,11 +24,11 @@ WAYFORPAY_MERCHANT = os.getenv("WAYFORPAY_MERCHANT")
 WAYFORPAY_SECRET = os.getenv("WAYFORPAY_SECRET")
 MERCHANT_DOMAIN = os.getenv("MERCHANT_DOMAIN", "yourdomain.com")
 PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Massage Course")
-AMOUNT = float(os.getenv("AMOUNT", "200.00"))
+AMOUNT = float(os.getenv("AMOUNT", "290.00"))
 CURRENCY = os.getenv("CURRENCY", "UAH")
 SERVICE_URL = os.getenv("SERVICE_URL")
 
-KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL")  # важливо!
+KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing")
@@ -44,20 +44,18 @@ user_links = {}
 
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
+
 # ===================== KEEP-ALIVE =====================
 
 async def keep_alive():
-    """
-    Пінгує Render кожні 5 хвилин, щоб сервіс не засинав.
-    """
     while True:
         try:
             async with aiohttp.ClientSession() as session:
                 await session.get(KEEP_ALIVE_URL)
-                print("Keep-alive ping OK")
+                print("Keep-alive OK")
         except Exception as e:
             print("Keep-alive error:", e)
-        await asyncio.sleep(300)  # 5 хвилин
+        await asyncio.sleep(300)
 
 
 # ===================== WAYFORPAY SIGNATURE HELPERS =====================
@@ -129,28 +127,22 @@ def wfp_response_signature(order_ref: str, status: str, ts: int) -> str:
     ).hexdigest()
 
 
-# ===================== STARTUP EVENT =====================
+# ===================== STARTUP =====================
 
 @app.on_event("startup")
 async def startup_event():
     await telegram_app.initialize()
     await telegram_app.start()
-
-    # запускаємо keep-alive task
     asyncio.create_task(keep_alive())
 
 
 # ===================== HELPERS =====================
 
 async def create_one_time_link(user_id: int) -> str:
-    """
-    Створює одноразовий інвайт-лінк без строку дії.
-    """
     invite = await telegram_app.bot.create_chat_invite_link(
         chat_id=CHANNEL_ID,
         member_limit=1
     )
-
     user_links[user_id] = invite.invite_link
     return invite.invite_link
 
@@ -167,13 +159,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Привіт! 👋\n\n"
         "Це бот доступу до курсу самомасажу.\n"
         "Натисни кнопку нижче, щоб отримати доступ.\n\n"
-        "Після оплати бот автоматично видасть одноразовий лінк у приватний канал."
+        "<b>Після оплати ти автоматично отримаєш особистий доступ у приватний канал.</b>"
     )
 
-    await update.message.reply_text(txt, reply_markup=keyboard)
+    await update.message.reply_text(txt, reply_markup=keyboard, parse_mode="HTML")
 
 
-# ---------- TEST PAYMENT (миттєво видає доступ) ----------
+# ---------- TEST PAYMENT ----------
 async def testpay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -185,16 +177,17 @@ async def testpay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await telegram_app.bot.send_message(
             chat_id=user_id,
             text=(
-                "🧪 *Тестова оплата успішна!*\n\n"
-                "Ось твій одноразовий доступ у канал з уроками:\n"
+                "🧪 <b>Тестова оплата успішна!</b>\n\n"
+                "Ось твій <b>особистий доступ</b> у канал з уроками:\n"
                 f"{link}"
             ),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
+
     except Exception as e:
         await query.message.reply_text(
-            f"Помилка:\n`{e}`",
-            parse_mode="Markdown"
+            f"Помилка:\n<code>{e}</code>",
+            parse_mode="HTML"
         )
         return
 
@@ -241,13 +234,13 @@ async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     txt = (
-        "Готово! 🎉\n"
+        "<b>Готово!</b> 🎉\n\n"
         "Оплатіть за посиланням:\n"
         f"{invoice}\n\n"
-        "Після оплати бот автоматично видасть доступ."
+        "Після оплати бот автоматично видасть особистий доступ."
     )
 
-    await query.message.reply_text(txt)
+    await query.message.reply_text(txt, parse_mode="HTML")
 
 
 telegram_app.add_handler(CommandHandler("start", start))
@@ -255,7 +248,7 @@ telegram_app.add_handler(CallbackQueryHandler(pay, pattern="^pay$"))
 telegram_app.add_handler(CallbackQueryHandler(testpay, pattern="^testpay$"))
 
 
-# ===================== WEBHOOK =====================
+# ===================== TELEGRAM WEBHOOK =====================
 
 @app.post("/telegram/webhook/{token}")
 async def telegram_webhook(token: str, request: Request):
@@ -292,10 +285,11 @@ async def wayforpay_callback(request: Request):
         await telegram_app.bot.send_message(
             chat_id=user_id,
             text=(
-                "Оплата успішна! 🎉\n\n"
-                "Ось твій доступ у приватний канал:\n"
+                "🎉 <b>Оплата успішна!</b>\n\n"
+                "Ось твій <b>особистий доступ</b> у приватний канал з уроками:\n"
                 f"{link}"
-            )
+            ),
+            parse_mode="HTML"
         )
 
     ts = int(time.time())
