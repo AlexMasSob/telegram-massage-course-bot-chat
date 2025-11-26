@@ -3,8 +3,9 @@ import hmac
 import hashlib
 import time
 import re
-
+import asyncio
 import aiohttp
+
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -27,20 +28,39 @@ AMOUNT = float(os.getenv("AMOUNT", "200.00"))
 CURRENCY = os.getenv("CURRENCY", "UAH")
 SERVICE_URL = os.getenv("SERVICE_URL")
 
+KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL")  # важливо!
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing")
 if not CHANNEL_ID:
     raise RuntimeError("CHANNEL_ID missing")
+if not KEEP_ALIVE_URL:
+    raise RuntimeError("KEEP_ALIVE_URL missing")
 
 app = FastAPI()
 
-pending_orders = {}  # {order_ref: user_id}
-user_links = {}       # {user_id: invite_link}
+pending_orders = {}
+user_links = {}
 
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
+# ===================== KEEP-ALIVE =====================
 
-# ===================== SIGNATURE HELPERS =====================
+async def keep_alive():
+    """
+    Пінгує Render кожні 5 хвилин, щоб сервіс не засинав.
+    """
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.get(KEEP_ALIVE_URL)
+                print("Keep-alive ping OK")
+        except Exception as e:
+            print("Keep-alive error:", e)
+        await asyncio.sleep(300)  # 5 хвилин
+
+
+# ===================== WAYFORPAY SIGNATURE HELPERS =====================
 
 def wfp_invoice_signature(payload: dict) -> str:
     parts = [
@@ -109,12 +129,15 @@ def wfp_response_signature(order_ref: str, status: str, ts: int) -> str:
     ).hexdigest()
 
 
-# ===================== STARTUP =====================
+# ===================== STARTUP EVENT =====================
 
 @app.on_event("startup")
 async def startup_event():
     await telegram_app.initialize()
     await telegram_app.start()
+
+    # запускаємо keep-alive task
+    asyncio.create_task(keep_alive())
 
 
 # ===================== HELPERS =====================
@@ -125,12 +148,11 @@ async def create_one_time_link(user_id: int) -> str:
     """
     invite = await telegram_app.bot.create_chat_invite_link(
         chat_id=CHANNEL_ID,
-        member_limit=1  # тільки 1 користувач
+        member_limit=1
     )
 
-    link = invite.invite_link
-    user_links[user_id] = link
-    return link
+    user_links[user_id] = invite.invite_link
+    return invite.invite_link
 
 
 # ===================== TELEGRAM HANDLERS =====================
@@ -151,7 +173,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(txt, reply_markup=keyboard)
 
 
-# ---------- TEST PAYMENT ----------
+# ---------- TEST PAYMENT (миттєво видає доступ) ----------
 async def testpay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -169,15 +191,14 @@ async def testpay(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
             parse_mode="Markdown"
         )
-
     except Exception as e:
         await query.message.reply_text(
-            f"Помилка при створенні інвайт-лінку:\n`{e}`",
+            f"Помилка:\n`{e}`",
             parse_mode="Markdown"
         )
         return
 
-    await query.message.reply_text("Готово! Перейди за лінком вище 🎉")
+    await query.message.reply_text("Готово! 🎉")
 
 
 # ---------- REAL PAYMENT ----------
@@ -215,18 +236,15 @@ async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data = await resp.json()
 
     invoice = data.get("invoiceUrl")
-
     if not invoice:
-        await query.message.reply_text(
-            "Помилка при створенні інвойсу. Спробуйте ще раз."
-        )
+        await query.message.reply_text("Помилка при створенні інвойсу.")
         return
 
     txt = (
-        "Готово! 🎉\n\n"
+        "Готово! 🎉\n"
         "Оплатіть за посиланням:\n"
         f"{invoice}\n\n"
-        "Після оплати бот автоматично видасть доступ у канал."
+        "Після оплати бот автоматично видасть доступ."
     )
 
     await query.message.reply_text(txt)
@@ -237,7 +255,7 @@ telegram_app.add_handler(CallbackQueryHandler(pay, pattern="^pay$"))
 telegram_app.add_handler(CallbackQueryHandler(testpay, pattern="^testpay$"))
 
 
-# ===================== TELEGRAM WEBHOOK =====================
+# ===================== WEBHOOK =====================
 
 @app.post("/telegram/webhook/{token}")
 async def telegram_webhook(token: str, request: Request):
@@ -253,11 +271,11 @@ async def telegram_webhook(token: str, request: Request):
 # ===================== WAYFORPAY CALLBACK =====================
 
 @app.post("/wayforpay/callback")
-async def wfp_callback(request: Request):
+async def wayforpay_callback(request: Request):
     body = await request.json()
 
     if not wfp_callback_valid(body):
-        return {"code": "error", "message": "bad signature"}
+        return {"code": "error", "msg": "bad signature"}
 
     order_ref = body.get("orderReference")
     status = body.get("transactionStatus")
@@ -292,6 +310,7 @@ async def wfp_callback(request: Request):
 
 
 # ===================== ROOT =====================
+
 @app.get("/")
 async def root():
     return {"status": "running"}
