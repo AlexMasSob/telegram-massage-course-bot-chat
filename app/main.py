@@ -6,8 +6,6 @@ import re
 
 import aiohttp
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
-
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
@@ -19,7 +17,7 @@ from telegram.ext import (
 # ===================== CONFIG =====================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN", "supersecret")
+WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 WAYFORPAY_MERCHANT = os.getenv("WAYFORPAY_MERCHANT")
 WAYFORPAY_SECRET = os.getenv("WAYFORPAY_SECRET")
@@ -30,18 +28,19 @@ CURRENCY = os.getenv("CURRENCY", "UAH")
 SERVICE_URL = os.getenv("SERVICE_URL")
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN missing!")
+    raise RuntimeError("BOT_TOKEN missing")
 if not CHANNEL_ID:
-    raise RuntimeError("CHANNEL_ID missing!")
+    raise RuntimeError("CHANNEL_ID missing")
 
 app = FastAPI()
 
-pending_orders = {}
-paid_users = set()
+pending_orders = {}  # {order_ref: user_id}
+user_links = {}       # {user_id: invite_link}
 
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# ===================== WAYFORPAY SIGNATURE HELPERS =====================
+
+# ===================== SIGNATURE HELPERS =====================
 
 def wfp_invoice_signature(payload: dict) -> str:
     parts = [
@@ -53,26 +52,30 @@ def wfp_invoice_signature(payload: dict) -> str:
         payload["currency"],
     ]
 
-    parts += [str(x) for x in payload["productName"]]
-    parts += [str(x) for x in payload["productCount"]]
-    parts += [str(x) for x in payload["productPrice"]]
+    for n in payload["productName"]:
+        parts.append(str(n))
+    for c in payload["productCount"]:
+        parts.append(str(c))
+    for p in payload["productPrice"]:
+        parts.append(str(p))
 
-    message = ";".join(parts)
+    msg = ";".join(parts)
 
     return hmac.new(
         WAYFORPAY_SECRET.encode(),
-        message.encode(),
+        msg.encode(),
         hashlib.md5
     ).hexdigest()
 
 
 def wfp_callback_valid(body: dict) -> bool:
-    fields = [
+    required = [
         "merchantAccount", "orderReference", "amount", "currency",
         "authCode", "cardPan", "transactionStatus", "reasonCode",
         "merchantSignature"
     ]
-    if not all(k in body for k in fields):
+
+    if not all(k in body for k in required):
         return False
 
     parts = [
@@ -86,31 +89,48 @@ def wfp_callback_valid(body: dict) -> bool:
         body["reasonCode"],
     ]
 
-    message = ";".join(parts)
+    msg = ";".join(parts)
+
     expected = hmac.new(
         WAYFORPAY_SECRET.encode(),
-        message.encode(),
+        msg.encode(),
         hashlib.md5
     ).hexdigest()
 
     return expected == body["merchantSignature"]
 
 
-def wfp_response_signature(order_ref: str, status: str, timestamp: int) -> str:
-    message = f"{order_ref};{status};{timestamp}"
+def wfp_response_signature(order_ref: str, status: str, ts: int) -> str:
+    msg = f"{order_ref};{status};{ts}"
     return hmac.new(
         WAYFORPAY_SECRET.encode(),
-        message.encode(),
+        msg.encode(),
         hashlib.md5
     ).hexdigest()
 
 
-# ===================== TELEGRAM STARTUP =====================
+# ===================== STARTUP =====================
 
 @app.on_event("startup")
 async def startup_event():
     await telegram_app.initialize()
     await telegram_app.start()
+
+
+# ===================== HELPERS =====================
+
+async def create_one_time_link(user_id: int) -> str:
+    """
+    Створює одноразовий інвайт-лінк без строку дії.
+    """
+    invite = await telegram_app.bot.create_chat_invite_link(
+        chat_id=CHANNEL_ID,
+        member_limit=1  # тільки 1 користувач
+    )
+
+    link = invite.invite_link
+    user_links[user_id] = link
+    return link
 
 
 # ===================== TELEGRAM HANDLERS =====================
@@ -121,60 +141,51 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🧪 Тестова оплата", callback_data="testpay")],
     ])
 
-    text = (
+    txt = (
         "Привіт! 👋\n\n"
         "Це бот доступу до курсу самомасажу.\n"
-        "Натисни кнопку нижче, щоб оплатити.\n\n"
-        "Після оплати ти автоматично отримаєш доступ у приватний канал."
+        "Натисни кнопку нижче, щоб отримати доступ.\n\n"
+        "Після оплати бот автоматично видасть одноразовий лінк у приватний канал."
     )
 
-    await update.message.reply_text(text, reply_markup=keyboard)
-
-
-# ---------- REAL WORKING: ADD USER TO CHANNEL ----------
-async def add_user_to_channel(user_id: int):
-    """Workaround: direct Telegram Bot API request (PTB21 removed addChatMember)"""
-    async with aiohttp.ClientSession() as session:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/inviteChatMember"
-        payload = {
-            "chat_id": CHANNEL_ID,
-            "user_id": user_id
-        }
-        async with session.post(url, json=payload) as resp:
-            result = await resp.json()
-            return result
+    await update.message.reply_text(txt, reply_markup=keyboard)
 
 
 # ---------- TEST PAYMENT ----------
 async def testpay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
 
-    result = await add_user_to_channel(user_id)
+    try:
+        link = await create_one_time_link(user_id)
 
-    if not result.get("ok"):
+        await telegram_app.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "🧪 *Тестова оплата успішна!*\n\n"
+                "Ось твій одноразовий доступ у канал з уроками:\n"
+                f"{link}"
+            ),
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
         await query.message.reply_text(
-            f"Помилка при додаванні в канал:\n`{result}`",
+            f"Помилка при створенні інвайт-лінку:\n`{e}`",
             parse_mode="Markdown"
         )
         return
 
-    await telegram_app.bot.send_message(
-        chat_id=user_id,
-        text="🧪 Тестова оплата успішна!\nТебе додано у приватний канал 🎉"
-    )
-
-    await query.message.reply_text("Готово! Ти в каналі 🎉")
+    await query.message.reply_text("Готово! Перейди за лінком вище 🎉")
 
 
 # ---------- REAL PAYMENT ----------
 async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
+
     order_ref = f"order_{user_id}"
     pending_orders[order_ref] = user_id
 
@@ -203,14 +214,22 @@ async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with session.post("https://api.wayforpay.com/api", json=payload) as resp:
             data = await resp.json()
 
-    invoice_url = data.get("invoiceUrl")
-    if not invoice_url:
-        await query.message.reply_text("Не вдалося створити інвойс. Спробуйте ще раз.")
+    invoice = data.get("invoiceUrl")
+
+    if not invoice:
+        await query.message.reply_text(
+            "Помилка при створенні інвойсу. Спробуйте ще раз."
+        )
         return
 
-    await query.message.reply_text(
-        f"Перейдіть за посиланням, щоб оплатити:\n{invoice_url}"
+    txt = (
+        "Готово! 🎉\n\n"
+        "Оплатіть за посиланням:\n"
+        f"{invoice}\n\n"
+        "Після оплати бот автоматично видасть доступ у канал."
     )
+
+    await query.message.reply_text(txt)
 
 
 telegram_app.add_handler(CommandHandler("start", start))
@@ -228,7 +247,6 @@ async def telegram_webhook(token: str, request: Request):
     data = await request.json()
     update = Update.de_json(data, telegram_app.bot)
     await telegram_app.process_update(update)
-
     return {"ok": True}
 
 
@@ -239,36 +257,41 @@ async def wfp_callback(request: Request):
     body = await request.json()
 
     if not wfp_callback_valid(body):
-        return {"code": "error", "message": "Invalid signature"}
+        return {"code": "error", "message": "bad signature"}
 
     order_ref = body.get("orderReference")
     status = body.get("transactionStatus")
 
-    match = re.match(r"order_(\d+)", order_ref)
-    if not match:
+    m = re.match(r"order_(\d+)", order_ref)
+    if not m:
         return {"code": "error"}
 
-    user_id = int(match.group(1))
+    user_id = int(m.group(1))
 
     if status == "Approved":
-        result = await add_user_to_channel(user_id)
-        if result.get("ok"):
-            await telegram_app.bot.send_message(
-                chat_id=user_id,
-                text="Оплата успішна! 🎉\nТебе додано у приватний канал."
-            )
+        link = await create_one_time_link(user_id)
 
-    timestamp = int(time.time())
-    sig = wfp_response_signature(order_ref, "accept", timestamp)
+        await telegram_app.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "Оплата успішна! 🎉\n\n"
+                "Ось твій доступ у приватний канал:\n"
+                f"{link}"
+            )
+        )
+
+    ts = int(time.time())
+    sig = wfp_response_signature(order_ref, "accept", ts)
 
     return {
         "orderReference": order_ref,
         "status": "accept",
-        "time": timestamp,
+        "time": ts,
         "signature": sig
     }
 
 
+# ===================== ROOT =====================
 @app.get("/")
 async def root():
     return {"status": "running"}
