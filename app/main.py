@@ -27,18 +27,15 @@ WAYFORPAY_MERCHANT = os.getenv("WAYFORPAY_MERCHANT")
 WAYFORPAY_SECRET = os.getenv("WAYFORPAY_SECRET")
 MERCHANT_DOMAIN = os.getenv("MERCHANT_DOMAIN", "yourdomain.com")
 
-# базові налаштування продукту №1
 PRODUCT_ID = int(os.getenv("PRODUCT_ID", "1"))
 PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Курс самомасажу")
-AMOUNT = float(os.getenv("AMOUNT", "290.00"))   # 290 грн
+AMOUNT = float(os.getenv("AMOUNT", "290.00"))
 CURRENCY = os.getenv("CURRENCY", "UAH")
 
 SERVICE_URL = os.getenv("SERVICE_URL")
 KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL")
 
-ADMIN_ID = 268351523  # твій Telegram ID
-
-# група підтримки (бот вже доданий туди)
+ADMIN_ID = 268351523
 SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID", "-5032163085"))
 
 if not BOT_TOKEN:
@@ -67,7 +64,7 @@ async def get_db() -> aiosqlite.Connection:
 
 async def init_db():
     conn = await get_db()
-    # users
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             telegram_id INTEGER PRIMARY KEY,
@@ -78,7 +75,7 @@ async def init_db():
             has_access INTEGER DEFAULT 0
         )
     """)
-    # products
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY,
@@ -88,7 +85,7 @@ async def init_db():
             is_active INTEGER DEFAULT 1
         )
     """)
-    # purchases
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS purchases (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,7 +99,7 @@ async def init_db():
             paid_at INTEGER
         )
     """)
-    # access_links
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS access_links (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,7 +110,7 @@ async def init_db():
             used INTEGER DEFAULT 0
         )
     """)
-    # messages (лог саппорта)
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,14 +123,12 @@ async def init_db():
         )
     """)
 
-    # вставляємо продукт №1, якщо його ще немає
     cur = await conn.execute("SELECT id FROM products WHERE id = ?", (PRODUCT_ID,))
-    row = await cur.fetchone()
-    if row is None:
-        await conn.execute(
-            "INSERT INTO products (id, name, price, currency, is_active) VALUES (?, ?, ?, ?, 1)",
-            (PRODUCT_ID, PRODUCT_NAME, AMOUNT, CURRENCY)
-        )
+    if await cur.fetchone() is None:
+        await conn.execute("""
+            INSERT INTO products (id, name, price, currency, is_active)
+            VALUES (?, ?, ?, ?, 1)
+        """, (PRODUCT_ID, PRODUCT_NAME, AMOUNT, CURRENCY))
 
     await conn.commit()
 
@@ -177,48 +172,53 @@ async def mark_access(telegram_id: int, product_id: int, invite_link: str | None
 async def create_purchase_pending(telegram_id: int, product_id: int, amount: float, currency: str, order_ref: str):
     conn = await get_db()
     now = int(time.time())
+
     await conn.execute("""
         INSERT INTO purchases (telegram_id, product_id, amount, currency, status, order_ref, created_at, paid_at)
         VALUES (?, ?, ?, ?, 'pending', ?, ?, NULL)
     """, (telegram_id, product_id, amount, currency, order_ref, now))
+
     await conn.commit()
 
 
 async def mark_purchase_paid(order_ref: str):
     conn = await get_db()
     now = int(time.time())
+
     await conn.execute("""
         UPDATE purchases
-        SET status = 'approved', paid_at = ?
-        WHERE order_ref = ?
+        SET status='approved', paid_at=?
+        WHERE order_ref=?
     """, (now, order_ref))
+
     await conn.commit()
 
 
 async def log_message(telegram_id: int, is_admin: int, direction: str, content_type: str, text: str | None):
     conn = await get_db()
     now = int(time.time())
+
     await conn.execute("""
         INSERT INTO messages (telegram_id, is_admin, direction, content_type, text, timestamp)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (telegram_id, is_admin, direction, content_type, text, now))
+
     await conn.commit()
 
 
-# ===================== KEEP-ALIVE =====================
+# ===================== KEEP ALIVE =====================
 
 async def keep_alive():
     while True:
         try:
-            async with aiohttp.ClientSession() as session:
-                await session.get(KEEP_ALIVE_URL)
-                print("Keep-alive OK")
+            async with aiohttp.ClientSession() as s:
+                await s.get(KEEP_ALIVE_URL)
         except Exception as e:
-            print("Keep-alive error:", e)
+            print("keep_alive error:", e)
         await asyncio.sleep(300)
 
 
-# ===================== WAYFORPAY SIGNATURE HELPERS =====================
+# ===================== WAYFORPAY HELPERS =====================
 
 def wfp_invoice_signature(payload: dict) -> str:
     parts = [
@@ -230,20 +230,16 @@ def wfp_invoice_signature(payload: dict) -> str:
         payload["currency"],
     ]
 
-    for n in payload["productName"]:
-        parts.append(str(n))
+    for p in payload["productName"]:
+        parts.append(str(p))
     for c in payload["productCount"]:
         parts.append(str(c))
-    for p in payload["productPrice"]:
-        parts.append(str(p))
+    for pr in payload["productPrice"]:
+        parts.append(str(pr))
 
     msg = ";".join(parts)
 
-    return hmac.new(
-        WAYFORPAY_SECRET.encode(),
-        msg.encode(),
-        hashlib.md5
-    ).hexdigest()
+    return hmac.new(WAYFORPAY_SECRET.encode(), msg.encode(), hashlib.md5).hexdigest()
 
 
 def wfp_callback_valid(body: dict) -> bool:
@@ -252,7 +248,6 @@ def wfp_callback_valid(body: dict) -> bool:
         "authCode", "cardPan", "transactionStatus", "reasonCode",
         "merchantSignature"
     ]
-
     if not all(k in body for k in required):
         return False
 
@@ -269,22 +264,13 @@ def wfp_callback_valid(body: dict) -> bool:
 
     msg = ";".join(parts)
 
-    expected = hmac.new(
-        WAYFORPAY_SECRET.encode(),
-        msg.encode(),
-        hashlib.md5
-    ).hexdigest()
-
+    expected = hmac.new(WAYFORPAY_SECRET.encode(), msg.encode(), hashlib.md5).hexdigest()
     return expected == body["merchantSignature"]
 
 
 def wfp_response_signature(order_ref: str, status: str, ts: int) -> str:
     msg = f"{order_ref};{status};{ts}"
-    return hmac.new(
-        WAYFORPAY_SECRET.encode(),
-        msg.encode(),
-        hashlib.md5
-    ).hexdigest()
+    return hmac.new(WAYFORPAY_SECRET.encode(), msg.encode(), hashlib.md5).hexdigest()
 
 
 # ===================== STARTUP =====================
@@ -299,6 +285,10 @@ async def startup_event():
 
 # ===================== HELPERS =====================
 
+def is_admin(update: Update) -> bool:
+    return update.effective_user and update.effective_user.id == ADMIN_ID
+
+
 async def create_one_time_link(telegram_id: int, product_id: int) -> str:
     invite = await telegram_app.bot.create_chat_invite_link(
         chat_id=CHANNEL_ID,
@@ -309,37 +299,44 @@ async def create_one_time_link(telegram_id: int, product_id: int) -> str:
     return link
 
 
-def is_admin(update: Update) -> bool:
-    return update.effective_user and update.effective_user.id == ADMIN_ID
-
-
-# ===================== TELEGRAM HANDLERS: /start =====================
+# ===================== /start =====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await upsert_user(user.id, user.username, user.first_name)
+
+    args = context.args
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Оплатити курс", callback_data=f"pay:{PRODUCT_ID}")],
         [InlineKeyboardButton("🧪 Тестова оплата", callback_data=f"testpay:{PRODUCT_ID}")],
     ])
 
-    txt = (
-        "Привіт! 👋\n\n"
-        "Це бот доступу до курсу самомасажу.\n"
-        "Натисни кнопку нижче, щоб отримати доступ.\n\n"
-        "<b>Після оплати ти автоматично отримаєш особистий доступ у приватний канал.</b>"
-    )
+    if args and args[0] == "site":
+        txt = (
+            "Вітаю! 👋\n\n"
+            "Ви перейшли з сайту <b>Сам Собі Масажист</b>.\n\n"
+            "Натисни кнопку нижче, щоб оплатити курс і отримати доступ "
+            "у приватний канал з відеоуроками ❤️"
+        )
+    else:
+        txt = (
+            "Привіт! 👋\n\n"
+            "Це бот доступу до курсу самомасажу.\n"
+            "Натисни кнопку нижче, щоб отримати доступ.\n\n"
+            "<b>Після оплати ти автоматично отримаєш особистий доступ у приватний канал.</b>"
+        )
 
     await update.message.reply_text(txt, reply_markup=keyboard, parse_mode="HTML")
 
 
-# ===================== /access (повторний доступ) =====================
+telegram_app.add_handler(CommandHandler("start", start))
+
+
+# ===================== /access =====================
 
 async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    telegram_id = user.id
-
     await upsert_user(user.id, user.username, user.first_name)
 
     conn = await get_db()
@@ -348,7 +345,7 @@ async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SELECT COUNT(*) AS c
         FROM purchases
         WHERE telegram_id = ? AND status='approved'
-    """, (telegram_id,))
+    """, (user.id,))
     row = await cur.fetchone()
 
     if row["c"] == 0:
@@ -364,8 +361,7 @@ async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        link = await create_one_time_link(telegram_id, PRODUCT_ID)
-
+        link = await create_one_time_link(user.id, PRODUCT_ID)
         await update.message.reply_text(
             "🔑 <b>Ось твій новий особистий доступ у канал:</b>\n"
             f"{link}\n\n"
@@ -379,11 +375,15 @@ async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ===================== TEST PAYMENT =====================
+telegram_app.add_handler(CommandHandler("access", access_cmd))
+
+
+# ===================== TESTPAY =====================
 
 async def testpay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     user = query.from_user
     await upsert_user(user.id, user.username, user.first_name)
 
@@ -412,11 +412,15 @@ async def testpay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text("Готово! 🎉")
 
 
-# ===================== REAL PAYMENT =====================
+telegram_app.add_handler(CallbackQueryHandler(testpay_cb, pattern=r"^testpay:"))
+
+
+# ===================== PAYMENT =====================
 
 async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     user = query.from_user
     await upsert_user(user.id, user.username, user.first_name)
 
@@ -466,13 +470,10 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(txt, parse_mode="HTML")
 
 
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("access", access_cmd))
 telegram_app.add_handler(CallbackQueryHandler(pay_cb, pattern=r"^pay:"))
-telegram_app.add_handler(CallbackQueryHandler(testpay_cb, pattern=r"^testpay:"))
 
 
-# ===================== ADMIN: /stats =====================
+# ===================== /stats =====================
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -519,7 +520,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 telegram_app.add_handler(CommandHandler("stats", stats_cmd))
 
 
-# ===================== ADMIN: BROADCASTS (текст) =====================
+# ===================== TEXT BROADCASTS =====================
 
 async def broadcast_all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -612,7 +613,6 @@ async def broadcast_by_dates_cmd(update: Update, context: ContextTypes.DEFAULT_T
     if not is_admin(update):
         return
 
-    # формат: /broadcast_by_dates YYYY-MM-DD YYYY-MM-DD текст...
     parts = update.message.text.split(" ", 3)
     if len(parts) < 4:
         await update.message.reply_text(
@@ -660,7 +660,6 @@ async def broadcast_inactive_cmd(update: Update, context: ContextTypes.DEFAULT_T
     if not is_admin(update):
         return
 
-    # формат: /broadcast_inactive 30 Текст
     parts = update.message.text.split(" ", 2)
     if len(parts) < 3:
         await update.message.reply_text(
@@ -707,32 +706,172 @@ telegram_app.add_handler(CommandHandler("broadcast_by_dates", broadcast_by_dates
 telegram_app.add_handler(CommandHandler("broadcast_inactive", broadcast_inactive_cmd))
 
 
-# ===================== SUPPORT: /reply =====================
+# ===================== MEDIA BROADCASTS =====================
+
+async def resolve_audience(audience: str):
+    conn = await get_db()
+
+    if audience == "all":
+        cur = await conn.execute("SELECT telegram_id FROM users")
+        rows = await cur.fetchall()
+        return [r["telegram_id"] for r in rows]
+
+    if audience == "paid":
+        cur = await conn.execute("""
+            SELECT DISTINCT telegram_id
+            FROM purchases
+            WHERE status='approved'
+        """)
+        rows = await cur.fetchall()
+        return [r["telegram_id"] for r in rows]
+
+    if audience == "nonbuyers":
+        cur = await conn.execute("""
+            SELECT u.telegram_id
+            FROM users u
+            LEFT JOIN purchases p
+              ON u.telegram_id = p.telegram_id AND p.status='approved'
+            WHERE p.id IS NULL
+        """)
+        rows = await cur.fetchall()
+        return [r["telegram_id"] for r in rows]
+
+    if audience.startswith("inactive_"):
+        days = int(audience.split("_")[1])
+        now = int(time.time())
+        threshold = now - days * 86400
+
+        cur = await conn.execute("""
+            SELECT telegram_id
+            FROM users
+            WHERE last_activity < ?
+        """, (threshold,))
+        rows = await cur.fetchall()
+        return [r["telegram_id"] for r in rows]
+
+    if audience.startswith("dates_"):
+        try:
+            _, start_s, end_s = audience.split("_")
+        except ValueError:
+            return []
+
+        try:
+            start_ts = int(time.mktime(time.strptime(start_s, "%Y-%m-%d")))
+            end_ts = int(time.mktime(time.strptime(end_s, "%Y-%m-%d"))) + 86400
+        except Exception:
+            return []
+
+        cur = await conn.execute("""
+            SELECT DISTINCT telegram_id
+            FROM purchases
+            WHERE status='approved'
+              AND paid_at IS NOT NULL
+              AND paid_at >= ? AND paid_at < ?
+        """, (start_ts, end_ts))
+        rows = await cur.fetchall()
+        return [r["telegram_id"] for r in rows]
+
+    return []
+
+
+async def handle_media_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, media_type: str):
+    if not is_admin(update):
+        return
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text(
+            "Для медіа-розсилки:\n"
+            "1) Надішли боту медіа (фото/відео/аудіо/файл)\n"
+            "2) У відповіді на це повідомлення введи команду, наприклад:\n"
+            "/broadcast_photo all"
+        )
+        return
+
+    parts = update.message.text.split()
+    if len(parts) < 2:
+        await update.message.reply_text("Вкажи сегмент, наприклад: /broadcast_photo all")
+        return
+
+    audience = parts[1]
+    recipients = await resolve_audience(audience)
+    if not recipients:
+        await update.message.reply_text("Немає користувачів у вибраній аудиторії.")
+        return
+
+    src = update.message.reply_to_message
+
+    sent = 0
+    for uid in recipients:
+        try:
+            if media_type == "photo" and src.photo:
+                file = src.photo[-1].file_id
+                await telegram_app.bot.send_photo(chat_id=uid, photo=file, caption=src.caption or "")
+            elif media_type == "video" and src.video:
+                file = src.video.file_id
+                await telegram_app.bot.send_video(chat_id=uid, video=file, caption=src.caption or "")
+            elif media_type == "audio" and src.audio:
+                file = src.audio.file_id
+                await telegram_app.bot.send_audio(chat_id=uid, audio=file, caption=src.caption or "")
+            elif media_type == "document" and src.document:
+                file = src.document.file_id
+                await telegram_app.bot.send_document(chat_id=uid, document=file, caption=src.caption or "")
+            else:
+                continue
+
+            sent += 1
+            await asyncio.sleep(0.05)
+
+        except Exception as e:
+            print("media_broadcast error:", e)
+
+    await update.message.reply_text(f"Медіа-розсилку надіслано {sent} користувачам.")
+
+
+async def broadcast_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await handle_media_broadcast(update, context, "photo")
+
+
+async def broadcast_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await handle_media_broadcast(update, context, "video")
+
+
+async def broadcast_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await handle_media_broadcast(update, context, "audio")
+
+
+async def broadcast_doc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await handle_media_broadcast(update, context, "document")
+
+
+telegram_app.add_handler(CommandHandler("broadcast_photo", broadcast_photo))
+telegram_app.add_handler(CommandHandler("broadcast_video", broadcast_video))
+telegram_app.add_handler(CommandHandler("broadcast_audio", broadcast_audio))
+telegram_app.add_handler(CommandHandler("broadcast_doc", broadcast_doc))
+
+
+# ===================== SUPPORT /reply =====================
 
 async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
 
-    # формат: /reply user_id текст...
     parts = update.message.text.split(" ", 2)
     if len(parts) < 3:
-        await update.message.reply_text(
-            "Формат:\n/reply 123456789 Твоя відповідь користувачу"
-        )
+        await update.message.reply_text("Формат:\n/reply USER_ID текст відповіді")
         return
 
     try:
-        target_id = int(parts[1])
+        target = int(parts[1])
     except ValueError:
-        await update.message.reply_text("user_id має бути числом.")
+        await update.message.reply_text("USER_ID має бути числом.")
         return
 
-    reply_text = parts[2]
+    text = parts[2]
 
     try:
-        await telegram_app.bot.send_message(chat_id=target_id, text=reply_text)
-        await log_message(target_id, is_admin=1, direction="out", content_type="text", text=reply_text)
-        await update.message.reply_text("✔ Відповідь надіслана.")
+        await telegram_app.bot.send_message(target, text)
+        await log_message(target, 1, "out", "text", text)
+        await update.message.reply_text("Відповідь надіслана ✔")
     except Exception as e:
         await update.message.reply_text(
             f"Помилка при відправці відповіді:\n<code>{e}</code>",
@@ -743,42 +882,28 @@ async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 telegram_app.add_handler(CommandHandler("reply", reply_cmd))
 
 
-# ===================== SUPPORT: перехоплення всіх повідомлень юзерів =====================
+# ===================== SUPPORT: INCOMING MESSAGES =====================
 
-async def user_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Ловимо всі звичайні повідомлення користувачів (не команди),
-    логимо в БД і шлемо в групу підтримки.
-    """
-    if update.effective_chat is None or update.message is None:
+async def user_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
         return
 
     chat = update.effective_chat
     msg = update.message
     user = update.effective_user
 
-    # тільки приватні чати з користувачами
     if chat.type != "private":
         return
 
-    # не чіпаємо повідомлення адміна
-    if user and user.id == ADMIN_ID:
+    if user.id == ADMIN_ID:
         return
 
-    # не чіпаємо команди (/start, /access тощо)
     if msg.text and msg.text.startswith("/"):
         return
 
-    telegram_id = user.id
-    username = user.username or "-"
-    first_name = user.first_name or "-"
+    await upsert_user(user.id, user.username, user.first_name)
 
-    await upsert_user(telegram_id, username, first_name)
-
-    # визначаємо тип контенту
     content_type = "text"
-    text_content = msg.text or msg.caption or ""
-
     if msg.photo:
         content_type = "photo"
     elif msg.video:
@@ -792,15 +917,15 @@ async def user_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     elif msg.sticker:
         content_type = "sticker"
 
-    await log_message(telegram_id, is_admin=0, direction="in", content_type=content_type, text=text_content)
+    text_content = msg.text or msg.caption or ""
 
-    # формуємо красиве повідомлення в групу підтримки
-    has_username = f"@{username}" if user.username else "немає"
+    await log_message(user.id, 0, "in", content_type, text_content)
+
     summary = (
         "💬 <b>Нове повідомлення від користувача</b>\n\n"
-        f"👤 ID: <code>{telegram_id}</code>\n"
-        f"🙍‍♂️ Ім'я: <b>{first_name}</b>\n"
-        f"🔗 Username: {has_username}\n"
+        f"👤 ID: <code>{user.id}</code>\n"
+        f"🙍‍♂️ Ім'я: <b>{user.first_name}</b>\n"
+        f"🔗 Username: @{user.username if user.username else 'немає'}\n"
         f"📦 Тип: <b>{content_type}</b>\n"
     )
 
@@ -809,23 +934,66 @@ async def user_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         await telegram_app.bot.send_message(
-            chat_id=SUPPORT_CHAT_ID,
-            text=summary,
+            SUPPORT_CHAT_ID,
+            summary,
             parse_mode="HTML"
         )
 
-        # якщо є медіа — дублюємо саме повідомлення (фото/відео/голос) в групу
         if content_type != "text":
             await telegram_app.bot.copy_message(
-                chat_id=SUPPORT_CHAT_ID,
-                from_chat_id=chat.id,
-                message_id=msg.message_id
+                SUPPORT_CHAT_ID,
+                chat.id,
+                msg.message_id
             )
     except Exception as e:
         print("support forward error:", e)
 
 
-telegram_app.add_handler(MessageHandler(filters.ALL, user_message_handler))
+telegram_app.add_handler(MessageHandler(filters.ALL, user_msg_handler))
+
+
+# ===================== WAYFORPAY CALLBACK =====================
+
+@app.post("/wayforpay/callback")
+async def wfp_callback(request: Request):
+    body = await request.json()
+
+    if not wfp_callback_valid(body):
+        return {"code": "invalid-signature"}
+
+    order_ref = body.get("orderReference")
+    status = body.get("transactionStatus")
+
+    match = re.match(r"order_(\d+)_(\d+)", order_ref or "")
+    if not match:
+        return {"code": "bad-order-ref"}
+
+    product_id = int(match.group(1))
+    telegram_id = int(match.group(2))
+
+    if status == "Approved":
+        await mark_purchase_paid(order_ref)
+        link = await create_one_time_link(telegram_id, product_id)
+
+        await telegram_app.bot.send_message(
+            telegram_id,
+            (
+                "🎉 <b>Оплата успішна!</b>\n\n"
+                "Ось твій <b>особистий доступ</b> у приватний канал з уроками:\n"
+                f"{link}"
+            ),
+            parse_mode="HTML"
+        )
+
+    ts = int(time.time())
+    signature = wfp_response_signature(order_ref, "accept", ts)
+
+    return {
+        "orderReference": order_ref,
+        "status": "accept",
+        "time": ts,
+        "signature": signature
+    }
 
 
 # ===================== TELEGRAM WEBHOOK =====================
@@ -839,51 +1007,6 @@ async def telegram_webhook(token: str, request: Request):
     update = Update.de_json(data, telegram_app.bot)
     await telegram_app.process_update(update)
     return {"ok": True}
-
-
-# ===================== WAYFORPAY CALLBACK =====================
-
-@app.post("/wayforpay/callback")
-async def wayforpay_callback(request: Request):
-    body = await request.json()
-
-    if not wfp_callback_valid(body):
-        return {"code": "error", "msg": "bad signature"}
-
-    order_ref = body.get("orderReference")
-    status = body.get("transactionStatus")
-
-    # order_{product_id}_{telegram_id}
-    m = re.match(r"order_(\d+)_(\d+)", order_ref or "")
-    if not m:
-        return {"code": "error"}
-
-    product_id = int(m.group(1))
-    telegram_id = int(m.group(2))
-
-    if status == "Approved":
-        await mark_purchase_paid(order_ref)
-        link = await create_one_time_link(telegram_id, product_id)
-
-        await telegram_app.bot.send_message(
-            chat_id=telegram_id,
-            text=(
-                "🎉 <b>Оплата успішна!</b>\n\n"
-                "Ось твій <b>особистий доступ</b> у приватний канал з уроками:\n"
-                f"{link}"
-            ),
-            parse_mode="HTML"
-        )
-
-    ts = int(time.time())
-    sig = wfp_response_signature(order_ref, "accept", ts)
-
-    return {
-        "orderReference": order_ref,
-        "status": "accept",
-        "time": ts,
-        "signature": sig
-    }
 
 
 # ===================== ROOT =====================
