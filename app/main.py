@@ -319,13 +319,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Натисни кнопку нижче, щоб оплатити курс і отримати доступ "
             "у приватний канал з відеоуроками ❤️"
         )
-    else:
-        txt = (
-            "Привіт! 👋\n\n"
-            "Це бот доступу до курсу самомасажу.\n"
-            "Натисни кнопку нижче, щоб отримати доступ.\n\n"
-            "<b>Після оплати ти автоматично отримаєш особистий доступ у приватний канал.</b>"
-        )
+    txt = (
+    "Вітаю! 👋\n\n"
+    "Це бот доступу до курсу самомасажу.\n"
+    "Натисніть кнопку нижче, щоб отримати доступ.\n\n"
+    "<b>Після оплати Ви автоматично отримаєте особистий доступ у приватний канал.</b>"
+)
 
     await update.message.reply_text(txt, reply_markup=keyboard, parse_mode="HTML")
 
@@ -481,8 +480,11 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = await get_db()
     now = int(time.time())
-    day_ago = now - 86400
 
+    def period(ts_days):
+        return now - ts_days * 86400
+
+    # Загальна статистика
     cur = await conn.execute("SELECT COUNT(*) AS c FROM users")
     total_users = (await cur.fetchone())["c"]
 
@@ -492,30 +494,44 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur = await conn.execute("SELECT COALESCE(SUM(amount),0) AS s FROM purchases WHERE status='approved'")
     total_revenue = (await cur.fetchone())["s"]
 
-    cur = await conn.execute("SELECT COUNT(*) AS c FROM users WHERE last_activity >= ?", (day_ago,))
-    active_24h = (await cur.fetchone())["c"]
+    # Покупки за періоди
+    async def count_period(sec):
+        cur = await conn.execute("""
+            SELECT COUNT(*) AS c,
+                   COALESCE(SUM(amount),0) AS revenue
+            FROM purchases
+            WHERE status='approved'
+              AND paid_at >= ?
+        """, (sec,))
+        row = await cur.fetchone()
+        return row["c"], row["revenue"]
 
-    cur = await conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM purchases
-        WHERE status='approved' AND product_id=?
-    """, (PRODUCT_ID,))
-    product_buyers = (await cur.fetchone())["c"]
-
-    avg_check = total_revenue / total_paid if total_paid > 0 else 0
+    day_c, day_rev     = await count_period(period(1))
+    week_c, week_rev   = await count_period(period(7))
+    month_c, month_rev = await count_period(period(30))
+    q_c, q_rev         = await count_period(period(90))
 
     txt = (
         "<b>Статистика бота</b>\n\n"
-        f"👥 Усього користувачів: <b>{total_users}</b>\n"
-        f"💳 Усього покупців: <b>{total_paid}</b>\n"
-        f"💰 Загальний дохід: <b>{round(total_revenue, 2)} {CURRENCY}</b>\n"
-        f"📊 Середній чек: <b>{round(avg_check, 2)} {CURRENCY}</b>\n\n"
-        f"🔥 Покупців курсу “{PRODUCT_NAME}”: <b>{product_buyers}</b>\n"
-        f"⚡ Активних за 24 години: <b>{active_24h}</b>"
+
+        "👥 Усього користувачів: <b>{}</b>\n"
+        "💳 Усього покупців: <b>{}</b>\n"
+        "💰 Загальний дохід: <b>{} UAH</b>\n\n"
+
+        "<b>Продажі по періодах:</b>\n"
+        "📅 За 24 години: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "📆 За 7 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "🗓 За 30 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "📈 За 90 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+    ).format(
+        total_users, total_paid, round(total_revenue, 2),
+        day_c, round(day_rev, 2),
+        week_c, round(week_rev, 2),
+        month_c, round(month_rev, 2),
+        q_c, round(q_rev, 2)
     )
 
     await update.message.reply_text(txt, parse_mode="HTML")
-
 
 telegram_app.add_handler(CommandHandler("stats", stats_cmd))
 
@@ -979,7 +995,7 @@ async def wfp_callback(request: Request):
             telegram_id,
             (
                 "🎉 <b>Оплата успішна!</b>\n\n"
-                "Ось твій <b>особистий доступ</b> у приватний канал з уроками:\n"
+                "Ось Ваш <b>особистий доступ</b> у приватний канал з уроками:\n"
                 f"{link}"
             ),
             parse_mode="HTML"
