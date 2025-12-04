@@ -25,7 +25,7 @@ WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 WAYFORPAY_MERCHANT = os.getenv("WAYFORPAY_MERCHANT")
 WAYFORPAY_SECRET = os.getenv("WAYFORPAY_SECRET")
-MERCHANT_DOMAIN = os.getenv("MERCHANT_DOMAIN", "yourdomain.com")
+MERCHANT_DOMAIN = os.getenv("MERCHANT_DOMAIN", "telegram-massage-course-bot-chat.onrender.com")
 
 PRODUCT_ID = int(os.getenv("PRODUCT_ID", "1"))
 PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Курс самомасажу")
@@ -312,19 +312,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🧪 Тестова оплата", callback_data=f"testpay:{PRODUCT_ID}")],
     ])
 
-    if args and args[0] == "site":
+    if args and len(args) > 0 and args[0] == "site":
         txt = (
             "Вітаю! 👋\n\n"
             "Ви перейшли з сайту <b>Сам Собі Масажист</b>.\n\n"
-            "Натисніть кнопку нижче, щоб оплатити курс і отримати доступ "
+            "Натисніть, будь ласка, кнопку нижче, щоб оплатити курс і отримати доступ "
             "у приватний канал з відеоуроками ❤️"
         )
-    txt = (
-    "Вітаю! 👋\n\n"
-    "Це бот доступу до курсу самомасажу.\n"
-    "Натисніть кнопку нижче, щоб отримати доступ.\n\n"
-    "<b>Після оплати Ви автоматично отримаєте особистий доступ у приватний канал.</b>"
-)
+    else:
+        txt = (
+            "Вітаю! 👋\n\n"
+            "Це бот доступу до курсу самомасажу.\n"
+            "Натисніть кнопку нижче, щоб отримати доступ.\n\n"
+            "<b>Після оплати Ви автоматично отримаєте особистий доступ у приватний канал.</b>"
+        )
 
     await update.message.reply_text(txt, reply_markup=keyboard, parse_mode="HTML")
 
@@ -423,6 +424,13 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     await upsert_user(user.id, user.username, user.first_name)
 
+    if not WAYFORPAY_MERCHANT or not WAYFORPAY_SECRET:
+        await query.message.reply_text(
+            "Платіжна система тимчасово недоступна. Спробуйте, будь ласка, пізніше.",
+            parse_mode="HTML"
+        )
+        return
+
     data = query.data.split(":")
     product_id = int(data[1]) if len(data) > 1 else PRODUCT_ID
 
@@ -456,14 +464,14 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     invoice = data.get("invoiceUrl")
     if not invoice:
-        await query.message.reply_text("Помилка при створенні інвойсу.")
+        await query.message.reply_text("Помилка при створенні інвойсу. Спробуйте, будь ласка, пізніше.")
         return
 
     txt = (
         "<b>Готово!</b> 🎉\n\n"
         "Оплатіть за посиланням:\n"
         f"{invoice}\n\n"
-        "Після оплати бот автоматично видасть особистий доступ."
+        "Після оплати бот автоматично видасть Вам особистий доступ."
     )
 
     await query.message.reply_text(txt, parse_mode="HTML")
@@ -481,7 +489,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = await get_db()
     now = int(time.time())
 
-    def period(ts_days):
+    def period(ts_days: int) -> int:
         return now - ts_days * 86400
 
     # Загальна статистика
@@ -495,14 +503,14 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_revenue = (await cur.fetchone())["s"]
 
     # Покупки за періоди
-    async def count_period(sec):
+    async def count_period(from_ts: int):
         cur = await conn.execute("""
             SELECT COUNT(*) AS c,
                    COALESCE(SUM(amount),0) AS revenue
             FROM purchases
             WHERE status='approved'
               AND paid_at >= ?
-        """, (sec,))
+        """, (from_ts,))
         row = await cur.fetchone()
         return row["c"], row["revenue"]
 
@@ -513,25 +521,24 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     txt = (
         "<b>Статистика бота</b>\n\n"
-
         "👥 Усього користувачів: <b>{}</b>\n"
         "💳 Усього покупців: <b>{}</b>\n"
-        "💰 Загальний дохід: <b>{} UAH</b>\n\n"
-
+        "💰 Загальний дохід: <b>{} {}</b>\n\n"
         "<b>Продажі по періодах:</b>\n"
-        "📅 За 24 години: <b>{}</b> купівель – <b>{} UAH</b>\n"
-        "📆 За 7 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
-        "🗓 За 30 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
-        "📈 За 90 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "📅 За 24 години: <b>{}</b> купівель – <b>{} {}</b>\n"
+        "📆 За 7 днів: <b>{}</b> купівель – <b>{} {}</b>\n"
+        "🗓 За 30 днів: <b>{}</b> купівель – <b>{} {}</b>\n"
+        "📈 За 90 днів: <b>{}</b> купівель – <b>{} {}</b>\n"
     ).format(
-        total_users, total_paid, round(total_revenue, 2),
-        day_c, round(day_rev, 2),
-        week_c, round(week_rev, 2),
-        month_c, round(month_rev, 2),
-        q_c, round(q_rev, 2)
+        total_users, total_paid, round(total_revenue, 2), CURRENCY,
+        day_c, round(day_rev, 2), CURRENCY,
+        week_c, round(week_rev, 2), CURRENCY,
+        month_c, round(month_rev, 2), CURRENCY,
+        q_c, round(q_rev, 2), CURRENCY
     )
 
     await update.message.reply_text(txt, parse_mode="HTML")
+
 
 telegram_app.add_handler(CommandHandler("stats", stats_cmd))
 
@@ -544,7 +551,7 @@ async def broadcast_all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.split(" ", 1)
     if len(text) < 2:
-        await update.message.reply_text("Напиши текст після команди, наприклад:\n/broadcast_all Привіт! ❤️")
+        await update.message.reply_text("Напишіть текст після команди, наприклад:\n/broadcast_all Привіт! ❤️")
         return
     msg = text[1]
 
@@ -570,7 +577,7 @@ async def broadcast_paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     text = update.message.text.split(" ", 1)
     if len(text) < 2:
-        await update.message.reply_text("Напиши текст після команди, наприклад:\n/broadcast_paid Привіт, дякую за покупку! ❤️")
+        await update.message.reply_text("Напишіть текст після команди, наприклад:\n/broadcast_paid Дякуємо за покупку! ❤️")
         return
     msg = text[1]
 
@@ -600,7 +607,10 @@ async def broadcast_nonbuyers_cmd(update: Update, context: ContextTypes.DEFAULT_
 
     text = update.message.text.split(" ", 1)
     if len(text) < 2:
-        await update.message.reply_text("Напиши текст після команди, наприклад:\n/broadcast_nonbuyers Привіт! Ось спецпропозиція для тебе 💛")
+        await update.message.reply_text(
+            "Напишіть текст після команди, наприклад:\n"
+            "/broadcast_nonbuyers Привіт! Ось спецпропозиція саме для Вас 💛"
+        )
         return
     msg = text[1]
 
@@ -633,7 +643,7 @@ async def broadcast_by_dates_cmd(update: Update, context: ContextTypes.DEFAULT_T
     if len(parts) < 4:
         await update.message.reply_text(
             "Формат:\n"
-            "/broadcast_by_dates 2023-12-01 2023-12-31 Привіт, це офер для покупців грудня ❤️"
+            "/broadcast_by_dates 2023-12-01 2023-12-31 Ваш текст для покупців ❤️"
         )
         return
 
@@ -645,7 +655,7 @@ async def broadcast_by_dates_cmd(update: Update, context: ContextTypes.DEFAULT_T
         start_ts = int(time.mktime(time.strptime(start_date_str, "%Y-%m-%d")))
         end_ts = int(time.mktime(time.strptime(end_date_str, "%Y-%m-%d"))) + 86400
     except Exception:
-        await update.message.reply_text("Некоректний формат дати. Використовуй YYYY-MM-DD.")
+        await update.message.reply_text("Некоректний формат дати. Використовуйте YYYY-MM-DD.")
         return
 
     conn = await get_db()
@@ -679,7 +689,7 @@ async def broadcast_inactive_cmd(update: Update, context: ContextTypes.DEFAULT_T
     parts = update.message.text.split(" ", 2)
     if len(parts) < 3:
         await update.message.reply_text(
-            "Формат:\n/broadcast_inactive 30 Привіт! Давно тебе не було 🙂"
+            "Формат:\n/broadcast_inactive 30 Привіт! Давно Вас не було 🙂"
         )
         return
 
@@ -797,15 +807,15 @@ async def handle_media_broadcast(update: Update, context: ContextTypes.DEFAULT_T
     if not update.message.reply_to_message:
         await update.message.reply_text(
             "Для медіа-розсилки:\n"
-            "1) Надішли боту медіа (фото/відео/аудіо/файл)\n"
-            "2) У відповіді на це повідомлення введи команду, наприклад:\n"
+            "1) Надішліть боту медіа (фото/відео/аудіо/файл)\n"
+            "2) У відповіді на це повідомлення введіть команду, наприклад:\n"
             "/broadcast_photo all"
         )
         return
 
     parts = update.message.text.split()
     if len(parts) < 2:
-        await update.message.reply_text("Вкажи сегмент, наприклад: /broadcast_photo all")
+        await update.message.reply_text("Вкажіть сегмент, наприклад: /broadcast_photo all")
         return
 
     audience = parts[1]
