@@ -434,7 +434,7 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data.split(":")
     product_id = int(data[1]) if len(data) > 1 else PRODUCT_ID
 
-    order_ref = f"order_{product_id}_{user.id}"
+    order_ref = f"order_{product_id}_{user.id}_{int(time.time())}"
     await create_purchase_pending(user.id, product_id, AMOUNT, CURRENCY, order_ref)
 
     order_date = int(time.time())
