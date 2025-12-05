@@ -3,10 +3,12 @@ import hmac
 import hashlib
 import time
 import re
+import json
 import asyncio
+import logging
+
 import aiohttp
 import aiosqlite
-
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -18,6 +20,11 @@ from telegram.ext import (
     filters,
 )
 
+# ===================== LOGGING =====================
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # ===================== CONFIG =====================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -25,7 +32,7 @@ WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 WAYFORPAY_MERCHANT = os.getenv("WAYFORPAY_MERCHANT")
 WAYFORPAY_SECRET = os.getenv("WAYFORPAY_SECRET")
-MERCHANT_DOMAIN = os.getenv("MERCHANT_DOMAIN", "telegram-massage-course-bot-chat.onrender.com")
+MERCHANT_DOMAIN = os.getenv("MERCHANT_DOMAIN", "yourdomain.com")
 
 PRODUCT_ID = int(os.getenv("PRODUCT_ID", "1"))
 PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Курс самомасажу")
@@ -169,7 +176,13 @@ async def mark_access(telegram_id: int, product_id: int, invite_link: str | None
     await conn.commit()
 
 
-async def create_purchase_pending(telegram_id: int, product_id: int, amount: float, currency: str, order_ref: str):
+async def create_purchase_pending(
+    telegram_id: int,
+    product_id: int,
+    amount: float,
+    currency: str,
+    order_ref: str
+):
     conn = await get_db()
     now = int(time.time())
 
@@ -214,7 +227,7 @@ async def keep_alive():
             async with aiohttp.ClientSession() as s:
                 await s.get(KEEP_ALIVE_URL)
         except Exception as e:
-            print("keep_alive error:", e)
+            logger.warning("keep_alive error: %s", e)
         await asyncio.sleep(300)
 
 
@@ -316,7 +329,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt = (
             "Вітаю! 👋\n\n"
             "Ви перейшли з сайту <b>Сам Собі Масажист</b>.\n\n"
-            "Натисніть, будь ласка, кнопку нижче, щоб оплатити курс і отримати доступ "
+            "Натисніть кнопку нижче, щоб оплатити курс і отримати доступ "
             "у приватний канал з відеоуроками ❤️"
         )
     else:
@@ -424,17 +437,12 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     await upsert_user(user.id, user.username, user.first_name)
 
-    if not WAYFORPAY_MERCHANT or not WAYFORPAY_SECRET:
-        await query.message.reply_text(
-            "Платіжна система тимчасово недоступна. Спробуйте, будь ласка, пізніше.",
-            parse_mode="HTML"
-        )
-        return
-
     data = query.data.split(":")
     product_id = int(data[1]) if len(data) > 1 else PRODUCT_ID
 
+    # УНІКАЛЬНИЙ order_ref: додаємо timestamp
     order_ref = f"order_{product_id}_{user.id}_{int(time.time())}"
+
     await create_purchase_pending(user.id, product_id, AMOUNT, CURRENCY, order_ref)
 
     order_date = int(time.time())
@@ -458,20 +466,33 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     payload["merchantSignature"] = wfp_invoice_signature(payload)
 
+    logger.info("Sending WayForPay payload: %s", payload)
+
     async with aiohttp.ClientSession() as session:
         async with session.post("https://api.wayforpay.com/api", json=payload) as resp:
-            data = await resp.json()
+            resp_text = await resp.text()
+            logger.info("WayForPay response status=%s, body=%s", resp.status, resp_text)
+
+            # пробуємо розпарсити як JSON, якщо ні — показуємо помилку
+            try:
+                data = json.loads(resp_text)
+            except json.JSONDecodeError:
+                await query.message.reply_text(
+                    "Помилка від платіжного сервісу WayForPay.\n"
+                    "Спробуйте, будь ласка, пізніше або напишіть у підтримку.",
+                )
+                return
 
     invoice = data.get("invoiceUrl")
     if not invoice:
-        await query.message.reply_text("Помилка при створенні інвойсу. Спробуйте, будь ласка, пізніше.")
+        await query.message.reply_text("Помилка при створенні інвойсу.")
         return
 
     txt = (
         "<b>Готово!</b> 🎉\n\n"
         "Оплатіть за посиланням:\n"
         f"{invoice}\n\n"
-        "Після оплати бот автоматично видасть Вам особистий доступ."
+        "Після оплати бот автоматично видасть Ваш особистий доступ."
     )
 
     await query.message.reply_text(txt, parse_mode="HTML")
@@ -489,10 +510,9 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = await get_db()
     now = int(time.time())
 
-    def period(ts_days: int) -> int:
-        return now - ts_days * 86400
+    def period(days):
+        return now - days * 86400
 
-    # Загальна статистика
     cur = await conn.execute("SELECT COUNT(*) AS c FROM users")
     total_users = (await cur.fetchone())["c"]
 
@@ -502,8 +522,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur = await conn.execute("SELECT COALESCE(SUM(amount),0) AS s FROM purchases WHERE status='approved'")
     total_revenue = (await cur.fetchone())["s"]
 
-    # Покупки за періоди
-    async def count_period(from_ts: int):
+    async def count_period(from_ts):
         cur = await conn.execute("""
             SELECT COUNT(*) AS c,
                    COALESCE(SUM(amount),0) AS revenue
@@ -523,18 +542,18 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Статистика бота</b>\n\n"
         "👥 Усього користувачів: <b>{}</b>\n"
         "💳 Усього покупців: <b>{}</b>\n"
-        "💰 Загальний дохід: <b>{} {}</b>\n\n"
+        "💰 Загальний дохід: <b>{} UAH</b>\n\n"
         "<b>Продажі по періодах:</b>\n"
-        "📅 За 24 години: <b>{}</b> купівель – <b>{} {}</b>\n"
-        "📆 За 7 днів: <b>{}</b> купівель – <b>{} {}</b>\n"
-        "🗓 За 30 днів: <b>{}</b> купівель – <b>{} {}</b>\n"
-        "📈 За 90 днів: <b>{}</b> купівель – <b>{} {}</b>\n"
+        "📅 За 24 години: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "📆 За 7 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "🗓 За 30 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "📈 За 90 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
     ).format(
-        total_users, total_paid, round(total_revenue, 2), CURRENCY,
-        day_c, round(day_rev, 2), CURRENCY,
-        week_c, round(week_rev, 2), CURRENCY,
-        month_c, round(month_rev, 2), CURRENCY,
-        q_c, round(q_rev, 2), CURRENCY
+        total_users, total_paid, round(total_revenue, 2),
+        day_c, round(day_rev, 2),
+        week_c, round(week_rev, 2),
+        month_c, round(month_rev, 2),
+        q_c, round(q_rev, 2)
     )
 
     await update.message.reply_text(txt, parse_mode="HTML")
@@ -566,7 +585,7 @@ async def broadcast_all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            print("broadcast_all error:", e)
+            logger.warning("broadcast_all error: %s", e)
 
     await update.message.reply_text(f"Розсилка надіслана {sent} користувачам.")
 
@@ -577,7 +596,7 @@ async def broadcast_paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     text = update.message.text.split(" ", 1)
     if len(text) < 2:
-        await update.message.reply_text("Напишіть текст після команди, наприклад:\n/broadcast_paid Дякуємо за покупку! ❤️")
+        await update.message.reply_text("Напишіть текст після команди, наприклад:\n/broadcast_paid Привіт, дякую за покупку! ❤️")
         return
     msg = text[1]
 
@@ -596,7 +615,7 @@ async def broadcast_paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            print("broadcast_paid error:", e)
+            logger.warning("broadcast_paid error: %s", e)
 
     await update.message.reply_text(f"Розсилка покупцям надіслана {sent} користувачам.")
 
@@ -607,10 +626,7 @@ async def broadcast_nonbuyers_cmd(update: Update, context: ContextTypes.DEFAULT_
 
     text = update.message.text.split(" ", 1)
     if len(text) < 2:
-        await update.message.reply_text(
-            "Напишіть текст після команди, наприклад:\n"
-            "/broadcast_nonbuyers Привіт! Ось спецпропозиція саме для Вас 💛"
-        )
+        await update.message.reply_text("Напишіть текст після команди, наприклад:\n/broadcast_nonbuyers Привіт! Ось спецпропозиція для Вас 💛")
         return
     msg = text[1]
 
@@ -630,7 +646,7 @@ async def broadcast_nonbuyers_cmd(update: Update, context: ContextTypes.DEFAULT_
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            print("broadcast_nonbuyers error:", e)
+            logger.warning("broadcast_nonbuyers error: %s", e)
 
     await update.message.reply_text(f"Розсилка не-покупцям надіслана {sent} користувачам.")
 
@@ -643,7 +659,7 @@ async def broadcast_by_dates_cmd(update: Update, context: ContextTypes.DEFAULT_T
     if len(parts) < 4:
         await update.message.reply_text(
             "Формат:\n"
-            "/broadcast_by_dates 2023-12-01 2023-12-31 Ваш текст для покупців ❤️"
+            "/broadcast_by_dates 2023-12-01 2023-12-31 Привіт, це офер для покупців грудня ❤️"
         )
         return
 
@@ -675,7 +691,7 @@ async def broadcast_by_dates_cmd(update: Update, context: ContextTypes.DEFAULT_T
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            print("broadcast_by_dates error:", e)
+            logger.warning("broadcast_by_dates error: %s", e)
 
     await update.message.reply_text(
         f"Розсилка покупцям у період {start_date_str}–{end_date_str} надіслана {sent} користувачам."
@@ -718,7 +734,7 @@ async def broadcast_inactive_cmd(update: Update, context: ContextTypes.DEFAULT_T
             sent += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            print("broadcast_inactive error:", e)
+            logger.warning("broadcast_inactive error: %s", e)
 
     await update.message.reply_text(
         f"Розсилка неактивним за {days} днів надіслана {sent} користувачам."
@@ -848,7 +864,7 @@ async def handle_media_broadcast(update: Update, context: ContextTypes.DEFAULT_T
             await asyncio.sleep(0.05)
 
         except Exception as e:
-            print("media_broadcast error:", e)
+            logger.warning("media_broadcast error: %s", e)
 
     await update.message.reply_text(f"Медіа-розсилку надіслано {sent} користувачам.")
 
@@ -900,7 +916,7 @@ async def reply_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Відповідь надіслана ✔")
     except Exception as e:
         await update.message.reply_text(
-            f"Помилка при відправці відповіді:\n<code>{e}</code>",
+            f"Помилка при відправленні відповіді:\n<code>{e}</code>",
             parse_mode="HTML"
         )
 
@@ -972,7 +988,7 @@ async def user_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg.message_id
             )
     except Exception as e:
-        print("support forward error:", e)
+        logger.warning("support forward error: %s", e)
 
 
 telegram_app.add_handler(MessageHandler(filters.ALL, user_msg_handler))
@@ -983,6 +999,7 @@ telegram_app.add_handler(MessageHandler(filters.ALL, user_msg_handler))
 @app.post("/wayforpay/callback")
 async def wfp_callback(request: Request):
     body = await request.json()
+    logger.info("WayForPay callback body: %s", body)
 
     if not wfp_callback_valid(body):
         return {"code": "invalid-signature"}
