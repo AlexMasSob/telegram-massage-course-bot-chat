@@ -1,44 +1,40 @@
 import os
+import threading
 import hashlib
 import hmac
 import time
 import requests
 from dotenv import load_dotenv
+
 from fastapi import FastAPI, Request
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
 
 load_dotenv()
 
-# ---- TELEGRAM ----
+# === TELEGRAM ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-
 bot = Bot(token=BOT_TOKEN)
 
-# ---- WAYFORPAY ----
-WAYFORPAY_MERCHANT = os.getenv("WAYFORPAY_MERCHANT")   # freelance_user_...
+# === WAYFORPAY ===
+WAYFORPAY_MERCHANT = os.getenv("WAYFORPAY_MERCHANT")
 WAYFORPAY_SECRET = os.getenv("WAYFORPAY_SECRET")
-MERCHANT_DOMAIN = "www.massagesobi.com"                # <── Фіксоване значення
+MERCHANT_DOMAIN = "www.massagesobi.com"
 
 PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Курс самомасажу")
 AMOUNT = float(os.getenv("AMOUNT", "290.00"))
 CURRENCY = "UAH"
 
-# ---- CALLBACK URL ----
-SERVICE_URL = os.getenv("SERVICE_URL")  # https://telegram-massage-course-bot-chat.onrender.com/wayforpay/callback
+SERVICE_URL = os.getenv("SERVICE_URL")
 
-# ---- FASTAPI APP ----
+# === FASTAPI APP ===
 app = FastAPI()
 
 
-# ----------------------- HELPERS -----------------------------
+# -------- SIGNATURE GENERATION --------
 
 def generate_signature(data: dict) -> str:
-    """
-    Створює WayForPay signature у форматі:
-    merchantAccount;merchantDomainName;orderReference;orderDate;amount;currency;productName;productCount;productPrice
-    """
     parts = [
         data["merchantAccount"],
         data["merchantDomainName"],
@@ -52,6 +48,7 @@ def generate_signature(data: dict) -> str:
     ]
 
     string_to_sign = ";".join(parts)
+
     signature = hmac.new(
         WAYFORPAY_SECRET.encode(),
         string_to_sign.encode(),
@@ -81,11 +78,11 @@ def create_invoice(user_id):
 
     payload["merchantSignature"] = generate_signature(payload)
 
-    r = requests.post("https://api.wayforpay.com/api", json=payload)
-    return r.json()
+    res = requests.post("https://api.wayforpay.com/api", json=payload)
+    return res.json()
 
 
-# ----------------------- TELEGRAM HANDLERS -----------------------------
+# -------- TELEGRAM HANDLERS --------
 
 async def start(update, context):
     keyboard = [
@@ -97,7 +94,7 @@ async def start(update, context):
     await update.message.reply_text(
         "Вітаю! 👋\n"
         "Це бот доступу до курсу самомасажу.\n"
-        "Натисніть кнопку нижче, щоб оплатити курс і отримати доступ.",
+        "Натисніть кнопку нижче, щоб отримати доступ.",
         reply_markup=reply
     )
 
@@ -105,45 +102,39 @@ async def start(update, context):
 async def handle_buttons(update, context):
     query = update.callback_query
     user_id = query.from_user.id
-
     await query.answer()
 
     if query.data == "pay":
         invoice = create_invoice(user_id)
 
         if "invoiceUrl" in invoice:
-            await query.edit_message_text("Посилання для оплати:")
             await bot.send_message(chat_id=user_id, text=invoice["invoiceUrl"])
         else:
             await bot.send_message(chat_id=user_id, text="Помилка при створенні інвойсу.")
 
     elif query.data == "testpay":
-        await bot.send_message(chat_id=user_id, text="Тестова оплата: доступ надано!")
-        await bot.send_message(chat_id=CHANNEL_ID, text=f"ТЕСТ: користувач {user_id} отримав доступ.")
+        await bot.send_message(chat_id=user_id, text="ТЕСТ: доступ надано!")
         await bot.approve_chat_join_request(CHANNEL_ID, user_id)
 
 
-# ----------------------- WAYFORPAY CALLBACK -----------------------------
+# -------- WAYFORPAY CALLBACK --------
 
 @app.post("/wayforpay/callback")
 async def wayforpay_callback(request: Request):
     data = await request.json()
 
     if data.get("transactionStatus") == "Approved":
-        user_id = extract_user_id(data)
+        user_id = extract_user(data)
         if user_id:
             await bot.approve_chat_join_request(CHANNEL_ID, user_id)
-            await bot.send_message(chat_id=user_id, text="🎉 Оплату підтверджено!\nВас додано до приватного каналу.")
+            await bot.send_message(chat_id=user_id, text="🎉 Оплата підтверджена! Доступ надано.")
+
         return {"status": "success"}
 
     return {"status": "ignored"}
 
 
-def extract_user_id(data):
-    """
-    В orderReference ми кладемо: order_userId_timestamp
-    Звідси дістаємо userId
-    """
+def extract_user(data):
     try:
         ref = data["orderReference"]
         return int(ref.split("_")[1])
@@ -151,14 +142,14 @@ def extract_user_id(data):
         return None
 
 
-# ----------------------- TELEGRAM APP RUN -----------------------------
+# -------- TELEGRAM BOT RUN IN SEPARATE THREAD --------
 
-telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CallbackQueryHandler(handle_buttons))
+def run_bot():
+    app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
+    app_tg.add_handler(CommandHandler("start", start))
+    app_tg.add_handler(CallbackQueryHandler(handle_buttons))
+    app_tg.run_polling()
 
 
-@app.on_event("startup")
-async def on_startup():
-    print("Bot is starting...")
-    telegram_app.create_task(telegram_app.run_polling())
+# запускаємо Telegram у фоновому потоці
+threading.Thread(target=run_bot, daemon=True).start()
