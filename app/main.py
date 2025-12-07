@@ -1,172 +1,167 @@
 import os
-import hmac
 import hashlib
-import json
-import time
+import base64
+from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.enums import ParseMode
 
+# --- ENV VARIABLES ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 WAYFORPAY_MERCHANT = os.getenv("WAYFORPAY_MERCHANT")
 WAYFORPAY_SECRET = os.getenv("WAYFORPAY_SECRET")
-MERCHANT_DOMAIN = os.getenv("MERCHANT_DOMAIN", "massagesobi.com")
+MERCHANT_DOMAIN = "www.massagesobi.com"  # <--- ВАЖЛИВО!
 
-PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Massage Course")
-AMOUNT = float(os.getenv("AMOUNT", "290.00"))
-CURRENCY = os.getenv("CURRENCY", "UAH")
+PRODUCT_NAME = "Massage Course"
+PRODUCT_PRICE = "290"
+CURRENCY = "UAH"
 
 SERVICE_URL = os.getenv("SERVICE_URL")  # https://telegram-massage-course-bot-chat.onrender.com/wayforpay/callback
 
-bot = Bot(token=TELEGRAM_TOKEN, session=AiohttpSession())
+bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 app = FastAPI()
 
 
-# ============================================================
-# 🔥 ФУНКЦІЯ ГЕНЕРАЦІЇ ПІДПИСУ — З ЛОГУВАННЯМ ДЛЯ ДІАГНОСТИКИ
-# ============================================================
-def create_signature(data: dict, secret: str) -> str:
-    fields = [
-        data.get("merchantAccount", ""),
-        data.get("merchantDomainName", ""),
-        data.get("orderReference", ""),
-        str(data.get("orderDate", "")),
+# -------------------------------
+#  SIGNATURE BUILDER (WAYFORPAY)
+# -------------------------------
+def build_signature(order_reference, order_date):
+    elements = [
+        WAYFORPAY_MERCHANT,
+        MERCHANT_DOMAIN,
+        order_reference,
+        str(order_date),
+        PRODUCT_PRICE,
+        CURRENCY,
+        PRODUCT_NAME,
+        "1",
+        PRODUCT_PRICE,
     ]
-
-    product_names = data.get("productName", [])
-    product_counts = data.get("productCount", [])
-    product_prices = data.get("productPrice", [])
-
-    fields.extend(product_names)
-    fields.extend([str(x) for x in product_counts])
-    fields.extend([str(x) for x in product_prices])
-
-    signature_string = ";".join(fields)
-
-    signature = hmac.new(
-        secret.encode("utf-8"),
-        signature_string.encode("utf-8"),
-        hashlib.md5
-    ).hexdigest()
-
-    print("\n===== WAYFORPAY SIGNATURE DEBUG =====")
-    print("Signature string:")
-    print(signature_string)
-    print("\nGenerated signature:")
-    print(signature)
-    print("====================================\n")
-
+    string_to_sign = ";".join(elements)
+    sha1_hash = hashlib.sha1((string_to_sign + WAYFORPAY_SECRET).encode("utf-8")).digest()
+    signature = base64.b64encode(sha1_hash).decode("utf-8")
     return signature
 
 
-# ============================================================
-# 🔥 TELEGRAM — START
-# ============================================================
-@dp.message(CommandStart())
-async def start(message: types.Message):
-    kb = InlineKeyboardBuilder()
-    kb.button(text="💳 Оплатити курс", callback_data="pay")
-    kb.button(text="🧪 Тестова оплата", callback_data="pay_test")
-    kb.adjust(1)
+# -------------------------------
+#  CREATE INVOICE (BUTTON PRESS)
+# -------------------------------
+async def create_invoice(user_id: int):
+    order_reference = f"order_{user_id}_{int(datetime.now().timestamp())}"
+    order_date = int(datetime.now().timestamp())
 
-    await message.answer(
-        "Вітаю! 👋\n\n"
-        "Це бот доступу до курсу самомасажу.\n"
-        "Натисніть кнопку нижче, щоб отримати доступ.\n\n"
-        "Після оплати Ви автоматично отримаєте доступ у приватний канал з відеоуроками ❤️",
-        reply_markup=kb.as_markup()
-    )
-
-
-# ============================================================
-# 🔥 TELEGRAM — CALLBACK "PAY"
-# ============================================================
-@dp.callback_query(lambda c: c.data.startswith("pay"))
-async def process_payment(call: types.CallbackQuery):
-    is_test = call.data == "pay_test"
-
-    order_ref = f"order_{int(time.time())}"
-    timestamp = int(time.time())
+    signature = build_signature(order_reference, order_date)
 
     payload = {
         "transactionType": "CREATE_INVOICE",
         "merchantAccount": WAYFORPAY_MERCHANT,
         "merchantDomainName": MERCHANT_DOMAIN,
-        "orderReference": order_ref,
-        "orderDate": timestamp,
-        "amount": AMOUNT,
+        "orderReference": order_reference,
+        "orderDate": order_date,
+        "amount": PRODUCT_PRICE,
         "currency": CURRENCY,
         "productName": [PRODUCT_NAME],
-        "productCount": [1],
-        "productPrice": [AMOUNT],
+        "productPrice": [PRODUCT_PRICE],
+        "productCount": ["1"],
         "language": "UA",
-        "apiVersion": 1,
         "serviceUrl": SERVICE_URL,
+        "merchantSignature": signature,
     }
 
-    payload["merchantSignature"] = create_signature(payload, WAYFORPAY_SECRET)
+    print("Sending WayForPay payload:", payload)
 
-    # 🔥 ЛОГУЄМО PAYLOAD ПЕРЕД ВІДПРАВКОЮ
-    print("\n===== WAYFORPAY PAYLOAD TO SEND =====")
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
-    print("====================================\n")
+    import requests
+    r = requests.post("https://api.wayforpay.com/api", json=payload)
+    print("WayForPay response:", r.text)
 
-    import aiohttp
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://api.wayforpay.com/api",
-            json=payload
-        ) as response:
-            resp_text = await response.text()
-            print("===== WAYFORPAY RAW RESPONSE =====")
-            print(resp_text)
-            print("=================================\n")
+    try:
+        data = r.json()
+    except:
+        return None, "Invalid response from WayForPay"
 
-            try:
-                data = json.loads(resp_text)
-            except:
-                await call.message.answer("❌ Помилка WayForPay: неправильна відповідь")
-                return
-
-            if data.get("reasonCode") == 1100:
-                invoice_url = data.get("invoiceUrl")
-                await call.message.answer(f"Перейдіть для оплати:\n{invoice_url}")
-            else:
-                await call.message.answer(f"❌ Помилка при створенні інвойсу.\n"
-                                          f"Код: {data.get('reasonCode')}\n"
-                                          f"Причина: {data.get('reason')}")
+    if "invoiceUrl" in data:
+        return data["invoiceUrl"], None
+    else:
+        return None, data.get("reason", "Error")
 
 
-# ============================================================
-# 🔥 CALLBACK ДЛЯ WayForPay
-# ============================================================
+# -------------------------------
+#   TELEGRAM BOT HANDLERS
+# -------------------------------
+@dp.message(CommandStart())
+async def start(message: types.Message):
+    kb = [
+        [types.KeyboardButton(text="💳 Оплатити курс")],
+        [types.KeyboardButton(text="🧪 Тестова оплата")]
+    ]
+    markup = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+    await message.answer(
+        "Вітаю! 👋\n\n"
+        "Це бот доступу до курсу самомасажу.\n"
+        "Натисніть кнопку нижче, щоб отримати доступ.\n\n"
+        "Після оплати Ви автоматично отримаєте доступ у приватний канал.",
+        reply_markup=markup
+    )
+
+
+@dp.message()
+async def handle_payment(message: types.Message):
+    if message.text in ["💳 Оплатити курс", "🧪 Тестова оплата"]:
+        url, err = await create_invoice(message.from_user.id)
+
+        if url:
+            await message.answer(f"Ваш рахунок готовий! Перейдіть за посиланням👇\n\n{url}")
+        else:
+            await message.answer(f"❌ Помилка при створенні інвойсу.\nПричина: {err}")
+    else:
+        await message.answer("Натисніть кнопку для оплати 👇")
+
+
+# -------------------------------
+#   WAYFORPAY CALLBACK
+# -------------------------------
 @app.post("/wayforpay/callback")
 async def wayforpay_callback(request: Request):
     data = await request.json()
-    print("\n===== WAYFORPAY CALLBACK RECEIVED =====")
-    print(json.dumps(data, indent=2, ensure_ascii=False))
-    print("=======================================\n")
+    print("WayForPay callback:", data)
 
     if data.get("transactionStatus") == "Approved":
-        user_id = data.get("clientAccount", None)
-        if user_id:
-            await bot.send_message(user_id, "🎉 Ваш платіж успішний! Доступ надано.")
+        user_id = int(data["orderReference"].split("_")[1])
 
-    return JSONResponse({"status": "success"})
+        await bot.send_message(
+            chat_id=user_id,
+            text="🎉 Дякуємо за оплату!\nВи отримали доступ до приватного каналу ❤️"
+        )
+
+        await bot.send_message(
+            chat_id=user_id,
+            text=f"Ваш канал: https://t.me/+{CHANNEL_ID}"
+        )
+
+    return JSONResponse({"status": "ok"})
 
 
-# ============================================================
-# 🔥 WEBHOOK
-# ============================================================
+# -------------------------------
+#   STARTUP
+# -------------------------------
+@app.on_event("startup")
+async def on_startup():
+    print("Bot started")
+
+
+# -------------------------------
+#   WEBHOOK ENDPOINT
+# -------------------------------
 @app.post("/telegram/webhook")
-async def telegram_webhook(request: Request):
-    update_data = await request.json()
-    await dp.feed_webhook_update(bot, update_data)
-    return JSONResponse({"ok": True})
+async def telegram_webhook(req: Request):
+    update = await req.json()
+    await dp.feed_update(bot, types.Update(**update))
+    return {"ok": True}
