@@ -1,167 +1,164 @@
 import os
 import hashlib
-import base64
-from datetime import datetime
+import hmac
+import time
+import requests
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
-from aiogram.enums import ParseMode
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
 
-# --- ENV VARIABLES ---
+load_dotenv()
+
+# ---- TELEGRAM ----
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
-
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
-WAYFORPAY_MERCHANT = os.getenv("WAYFORPAY_MERCHANT")
-WAYFORPAY_SECRET = os.getenv("WAYFORPAY_SECRET")
-MERCHANT_DOMAIN = "www.massagesobi.com"  # <--- ВАЖЛИВО!
+bot = Bot(token=BOT_TOKEN)
 
-PRODUCT_NAME = "Massage Course"
-PRODUCT_PRICE = "290"
+# ---- WAYFORPAY ----
+WAYFORPAY_MERCHANT = os.getenv("WAYFORPAY_MERCHANT")   # freelance_user_...
+WAYFORPAY_SECRET = os.getenv("WAYFORPAY_SECRET")
+MERCHANT_DOMAIN = "www.massagesobi.com"                # <── Фіксоване значення
+
+PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Курс самомасажу")
+AMOUNT = float(os.getenv("AMOUNT", "290.00"))
 CURRENCY = "UAH"
 
+# ---- CALLBACK URL ----
 SERVICE_URL = os.getenv("SERVICE_URL")  # https://telegram-massage-course-bot-chat.onrender.com/wayforpay/callback
 
-bot = Bot(BOT_TOKEN)
-dp = Dispatcher()
+# ---- FASTAPI APP ----
 app = FastAPI()
 
 
-# -------------------------------
-#  SIGNATURE BUILDER (WAYFORPAY)
-# -------------------------------
-def build_signature(order_reference, order_date):
-    elements = [
-        WAYFORPAY_MERCHANT,
-        MERCHANT_DOMAIN,
-        order_reference,
-        str(order_date),
-        PRODUCT_PRICE,
-        CURRENCY,
-        PRODUCT_NAME,
-        "1",
-        PRODUCT_PRICE,
+# ----------------------- HELPERS -----------------------------
+
+def generate_signature(data: dict) -> str:
+    """
+    Створює WayForPay signature у форматі:
+    merchantAccount;merchantDomainName;orderReference;orderDate;amount;currency;productName;productCount;productPrice
+    """
+    parts = [
+        data["merchantAccount"],
+        data["merchantDomainName"],
+        data["orderReference"],
+        str(data["orderDate"]),
+        str(data["amount"]),
+        data["currency"],
+        data["productName"][0],
+        str(data["productCount"][0]),
+        str(data["productPrice"][0]),
     ]
-    string_to_sign = ";".join(elements)
-    sha1_hash = hashlib.sha1((string_to_sign + WAYFORPAY_SECRET).encode("utf-8")).digest()
-    signature = base64.b64encode(sha1_hash).decode("utf-8")
+
+    string_to_sign = ";".join(parts)
+    signature = hmac.new(
+        WAYFORPAY_SECRET.encode(),
+        string_to_sign.encode(),
+        hashlib.md5
+    ).hexdigest()
+
     return signature
 
 
-# -------------------------------
-#  CREATE INVOICE (BUTTON PRESS)
-# -------------------------------
-async def create_invoice(user_id: int):
-    order_reference = f"order_{user_id}_{int(datetime.now().timestamp())}"
-    order_date = int(datetime.now().timestamp())
-
-    signature = build_signature(order_reference, order_date)
+def create_invoice(user_id):
+    order_ref = f"order_{user_id}_{int(time.time())}"
 
     payload = {
         "transactionType": "CREATE_INVOICE",
         "merchantAccount": WAYFORPAY_MERCHANT,
         "merchantDomainName": MERCHANT_DOMAIN,
-        "orderReference": order_reference,
-        "orderDate": order_date,
-        "amount": PRODUCT_PRICE,
+        "orderReference": order_ref,
+        "orderDate": int(time.time()),
+        "amount": AMOUNT,
         "currency": CURRENCY,
         "productName": [PRODUCT_NAME],
-        "productPrice": [PRODUCT_PRICE],
-        "productCount": ["1"],
-        "language": "UA",
+        "productCount": [1],
+        "productPrice": [AMOUNT],
         "serviceUrl": SERVICE_URL,
-        "merchantSignature": signature,
+        "apiVersion": 1,
     }
 
-    print("Sending WayForPay payload:", payload)
+    payload["merchantSignature"] = generate_signature(payload)
 
-    import requests
     r = requests.post("https://api.wayforpay.com/api", json=payload)
-    print("WayForPay response:", r.text)
-
-    try:
-        data = r.json()
-    except:
-        return None, "Invalid response from WayForPay"
-
-    if "invoiceUrl" in data:
-        return data["invoiceUrl"], None
-    else:
-        return None, data.get("reason", "Error")
+    return r.json()
 
 
-# -------------------------------
-#   TELEGRAM BOT HANDLERS
-# -------------------------------
-@dp.message(CommandStart())
-async def start(message: types.Message):
-    kb = [
-        [types.KeyboardButton(text="💳 Оплатити курс")],
-        [types.KeyboardButton(text="🧪 Тестова оплата")]
+# ----------------------- TELEGRAM HANDLERS -----------------------------
+
+async def start(update, context):
+    keyboard = [
+        [InlineKeyboardButton("💳 Оплатити курс", callback_data="pay")],
+        [InlineKeyboardButton("🧪 Тестова оплата", callback_data="testpay")]
     ]
-    markup = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+    reply = InlineKeyboardMarkup(keyboard)
 
-    await message.answer(
-        "Вітаю! 👋\n\n"
+    await update.message.reply_text(
+        "Вітаю! 👋\n"
         "Це бот доступу до курсу самомасажу.\n"
-        "Натисніть кнопку нижче, щоб отримати доступ.\n\n"
-        "Після оплати Ви автоматично отримаєте доступ у приватний канал.",
-        reply_markup=markup
+        "Натисніть кнопку нижче, щоб оплатити курс і отримати доступ.",
+        reply_markup=reply
     )
 
 
-@dp.message()
-async def handle_payment(message: types.Message):
-    if message.text in ["💳 Оплатити курс", "🧪 Тестова оплата"]:
-        url, err = await create_invoice(message.from_user.id)
+async def handle_buttons(update, context):
+    query = update.callback_query
+    user_id = query.from_user.id
 
-        if url:
-            await message.answer(f"Ваш рахунок готовий! Перейдіть за посиланням👇\n\n{url}")
+    await query.answer()
+
+    if query.data == "pay":
+        invoice = create_invoice(user_id)
+
+        if "invoiceUrl" in invoice:
+            await query.edit_message_text("Посилання для оплати:")
+            await bot.send_message(chat_id=user_id, text=invoice["invoiceUrl"])
         else:
-            await message.answer(f"❌ Помилка при створенні інвойсу.\nПричина: {err}")
-    else:
-        await message.answer("Натисніть кнопку для оплати 👇")
+            await bot.send_message(chat_id=user_id, text="Помилка при створенні інвойсу.")
+
+    elif query.data == "testpay":
+        await bot.send_message(chat_id=user_id, text="Тестова оплата: доступ надано!")
+        await bot.send_message(chat_id=CHANNEL_ID, text=f"ТЕСТ: користувач {user_id} отримав доступ.")
+        await bot.approve_chat_join_request(CHANNEL_ID, user_id)
 
 
-# -------------------------------
-#   WAYFORPAY CALLBACK
-# -------------------------------
+# ----------------------- WAYFORPAY CALLBACK -----------------------------
+
 @app.post("/wayforpay/callback")
 async def wayforpay_callback(request: Request):
     data = await request.json()
-    print("WayForPay callback:", data)
 
     if data.get("transactionStatus") == "Approved":
-        user_id = int(data["orderReference"].split("_")[1])
+        user_id = extract_user_id(data)
+        if user_id:
+            await bot.approve_chat_join_request(CHANNEL_ID, user_id)
+            await bot.send_message(chat_id=user_id, text="🎉 Оплату підтверджено!\nВас додано до приватного каналу.")
+        return {"status": "success"}
 
-        await bot.send_message(
-            chat_id=user_id,
-            text="🎉 Дякуємо за оплату!\nВи отримали доступ до приватного каналу ❤️"
-        )
-
-        await bot.send_message(
-            chat_id=user_id,
-            text=f"Ваш канал: https://t.me/+{CHANNEL_ID}"
-        )
-
-    return JSONResponse({"status": "ok"})
+    return {"status": "ignored"}
 
 
-# -------------------------------
-#   STARTUP
-# -------------------------------
+def extract_user_id(data):
+    """
+    В orderReference ми кладемо: order_userId_timestamp
+    Звідси дістаємо userId
+    """
+    try:
+        ref = data["orderReference"]
+        return int(ref.split("_")[1])
+    except:
+        return None
+
+
+# ----------------------- TELEGRAM APP RUN -----------------------------
+
+telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CallbackQueryHandler(handle_buttons))
+
+
 @app.on_event("startup")
 async def on_startup():
-    print("Bot started")
-
-
-# -------------------------------
-#   WEBHOOK ENDPOINT
-# -------------------------------
-@app.post("/telegram/webhook")
-async def telegram_webhook(req: Request):
-    update = await req.json()
-    await dp.feed_update(bot, types.Update(**update))
-    return {"ok": True}
+    print("Bot is starting...")
+    telegram_app.create_task(telegram_app.run_polling())
