@@ -30,7 +30,7 @@ WAYFORPAY_SECRET = os.getenv("WAYFORPAY_SECRET")
 MERCHANT_DOMAIN = os.getenv("MERCHANT_DOMAIN", "www.massagesobi.com")
 
 PRODUCT_ID = int(os.getenv("PRODUCT_ID", "1"))
-PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Курс самомасажу")
+PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Massage Course")
 AMOUNT = float(os.getenv("AMOUNT", "290.00"))
 CURRENCY = os.getenv("CURRENCY", "UAH")
 
