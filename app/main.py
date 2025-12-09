@@ -6,6 +6,7 @@ import re
 import asyncio
 import aiohttp
 import aiosqlite
+from urllib.parse import urlencode, quote_plus
 
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -25,20 +26,17 @@ WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
 
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # ID каналу з уроками
 
-# WayForPay config
+# WayForPay
 MERCHANT_PASSWORD = (os.getenv("MERCHANT_PASSWORD") or "").strip()
 MERCHANT_DOMAIN = (os.getenv("MERCHANT_DOMAIN", "www.massagesobi.com") or "").strip()
+PAYMENT_BASE_URL = (os.getenv("PAYMENT_BASE_URL") or "https://secure.wayforpay.com/payment/massagesobi").rstrip("/")
 
 PRODUCT_ID = int(os.getenv("PRODUCT_ID", "1"))
 PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Курс самомасажу")
 AMOUNT = float(os.getenv("AMOUNT", "290.00"))
 CURRENCY = os.getenv("CURRENCY", "UAH")
 
-# Готове посилання на платіжну кнопку WayForPay
-PAYMENT_LINK = (os.getenv("PAYMENT_LINK") or "https://secure.wayforpay.com/button/ba6a191c6ba56").strip()
-
-# URL твого сервісу для callback WayForPay
-# Використовується в налаштуваннях WayForPay як serviceUrl
+# URL твого сервісу для callback WayForPay (ставиться в кабінеті WayForPay як serviceUrl)
 SERVICE_URL = os.getenv("SERVICE_URL")
 
 # Для антизасинання
@@ -56,10 +54,6 @@ if not KEEP_ALIVE_URL:
     raise RuntimeError("KEEP_ALIVE_URL missing")
 if not MERCHANT_PASSWORD:
     raise RuntimeError("MERCHANT_PASSWORD missing")
-if not PAYMENT_LINK:
-    raise RuntimeError("PAYMENT_LINK missing")
-if not SERVICE_URL:
-    raise RuntimeError("SERVICE_URL missing")
 
 app = FastAPI()
 
@@ -194,18 +188,6 @@ async def create_purchase_pending(telegram_id: int, product_id: int, amount: flo
         INSERT INTO purchases (telegram_id, product_id, amount, currency, status, order_ref, created_at, paid_at)
         VALUES (?, ?, ?, ?, 'pending', ?, ?, NULL)
     """, (telegram_id, product_id, amount, currency, order_ref, now))
-
-    await conn.commit()
-
-
-async def create_purchase_approved(telegram_id: int, product_id: int, amount: float, currency: str, order_ref: str):
-    conn = await get_db()
-    now = int(time.time())
-
-    await conn.execute("""
-        INSERT INTO purchases (telegram_id, product_id, amount, currency, status, order_ref, created_at, paid_at)
-        VALUES (?, ?, ?, ?, 'approved', ?, ?, ?)
-    """, (telegram_id, product_id, amount, currency, order_ref, now, now))
 
     await conn.commit()
 
@@ -421,7 +403,7 @@ async def testpay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 telegram_app.add_handler(CallbackQueryHandler(testpay_cb, pattern=r"^testpay:"))
 
 
-# ===================== PAYMENT (через готову кнопку WayForPay) =====================
+# ===================== PAYMENT (через payment/massagesobi з унікальним orderReference) =====================
 
 async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -430,51 +412,38 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     await upsert_user(user.id, user.username, user.first_name)
 
+    data = query.data.split(":")
+    product_id = int(data[1]) if len(data) > 1 else PRODUCT_ID
+
+    # Унікальний orderReference: order_{product_id}_{telegram_id}_{timestamp}
+    ts = int(time.time())
+    order_ref = f"order_{product_id}_{user.id}_{ts}"
+
+    # Записуємо pending покупку
+    await create_purchase_pending(user.id, product_id, AMOUNT, CURRENCY, order_ref)
+
+    # Формуємо посилання на оплату
+    params = {
+        "orderReference": order_ref,
+        "amount": f"{AMOUNT:.2f}",
+        "currency": CURRENCY,
+        "productName": "Massage Course",  # Згідно з тим, що ти вказав
+    }
+    query_str = urlencode(params, quote_via=quote_plus)
+    payment_link = f"{PAYMENT_BASE_URL}?{query_str}"
+
     text = (
         "💳 <b>Оплата курсу</b>\n\n"
         "Щоб сплатити курс, перейдіть за посиланням нижче:\n\n"
-        f"{PAYMENT_LINK}\n\n"
-        "Після оплати натисніть, будь ласка, кнопку <b>«Я оплатив»</b>.\n"
-        "Якщо виникли питання — просто напишіть мені 🙂"
+        f"{payment_link}\n\n"
+        "Після успішної оплати Ви автоматично отримаєте доступ у приватний канал з уроками.\n"
+        "Якщо оплата не пройде, WayForPay покаже помилку на сторінці оплати."
     )
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Я оплатив", callback_data="paid_confirm")]
-    ])
-
-    await query.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+    await query.message.reply_text(text, parse_mode="HTML")
 
 
 telegram_app.add_handler(CallbackQueryHandler(pay_cb, pattern=r"^pay:"))
-
-
-async def paid_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user = query.from_user
-    await upsert_user(user.id, user.username, user.first_name)
-
-    # Створюємо запис про покупку зі статусом approved
-    order_ref = f"button_{PRODUCT_ID}_{user.id}_{int(time.time())}"
-    await create_purchase_approved(user.id, PRODUCT_ID, AMOUNT, CURRENCY, order_ref)
-
-    try:
-        link = await create_one_time_link(user.id, PRODUCT_ID)
-        await query.message.reply_text(
-            "🎉 <b>Дякуємо за оплату!</b>\n\n"
-            "Ось Ваш <b>особистий доступ</b> у приватний канал з уроками:\n"
-            f"{link}",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        await query.message.reply_text(
-            f"Помилка при видачі доступу:\n<code>{e}</code>",
-            parse_mode="HTML"
-        )
-
-
-telegram_app.add_handler(CallbackQueryHandler(paid_confirm_cb, pattern=r"^paid_confirm$"))
 
 
 # ===================== /stats =====================
@@ -771,7 +740,7 @@ async def resolve_audience(audience: str):
             _, start_s, end_s = audience.split("_")
         except ValueError:
             return []
-
+ 
         try:
             start_ts = int(time.mktime(time.strptime(start_s, "%Y-%m-%d")))
             end_ts = int(time.mktime(time.strptime(end_s, "%Y-%m-%d"))) + 86400
