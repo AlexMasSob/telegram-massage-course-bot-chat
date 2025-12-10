@@ -7,7 +7,7 @@ from fastapi import FastAPI
 # CONFIG
 # -----------------------------
 MERCHANT_ACCOUNT = "freelance_user_68fcc913e7b6e"
-MERCHANT_PASSWORD = "e73cdf0eab18148a76c5f02eb9640000"
+MERCHANT_PASSWORD = "e73cdf0eab18148a76c5f02eb96454c3"
 MERCHANT_DOMAIN = "www.massagesobi.com"
 
 # -----------------------------
