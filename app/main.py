@@ -1,15 +1,31 @@
 import hashlib
 import json
 import aiohttp
+from fastapi import FastAPI
 
+# -----------------------------
+# CONFIG
+# -----------------------------
 MERCHANT_ACCOUNT = "freelance_user_68fcc913e7b6e"
 MERCHANT_PASSWORD = "e73cdf0eab18148a76c5f02eb9640000"
 MERCHANT_DOMAIN = "www.massagesobi.com"
 
+# -----------------------------
+# CREATE FASTAPI APP
+# -----------------------------
+app = FastAPI()
+
+@app.get("/")
+def root():
+    return {"status": "running"}
+
+# -----------------------------
+# WAYFORPAY TEST INVOICE
+# -----------------------------
+
 async def create_invoice():
     url = "https://api.wayforpay.com/api"
 
-    # УВАГА: тільки такі назви і порядок елементів!
     data = {
         "transactionType": "CREATE_INVOICE",
         "merchantAccount": MERCHANT_ACCOUNT,
@@ -24,7 +40,6 @@ async def create_invoice():
         "productCount": [1]
     }
 
-    # Формування підпису (str і саме в такому порядку)
     signature_string = ";".join([
         data["merchantAccount"],
         data["merchantDomainName"],
@@ -43,9 +58,17 @@ async def create_invoice():
 
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=data) as resp:
-            text = await resp.text()
-            print("RAW RESPONSE:", text)
+            raw = await resp.text()
+            print("WAYFORPAY RAW RESPONSE:", raw)   # ⬅ ВАЖЛИВО
             try:
-                return json.loads(text)
+                return json.loads(raw)
             except:
-                return {"error": "NOT_JSON", "raw": text}
+                return {"error": "NOT_JSON", "raw": raw}
+
+# -----------------------------
+# API ENDPOINT FOR TEST RUN
+# -----------------------------
+@app.get("/test-wfp")
+async def test_wayforpay():
+    response = await create_invoice()
+    return response
