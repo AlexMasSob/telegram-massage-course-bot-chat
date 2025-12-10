@@ -3,106 +3,108 @@ import time
 import hmac
 import hashlib
 import aiohttp
-from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+import asyncio
+
+from fastapi import FastAPI, Request, HTTPException
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# --------------------------
-# ENV CONFIG
-# --------------------------
+# ======== ENV ========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
 
-MERCHANT_ACCOUNT = os.getenv("MERCHANT_LOGIN")
-MERCHANT_PASSWORD = os.getenv("MERCHANT_PASSWORD")  # 32 символи
-MERCHANT_DOMAIN = "massagesobi.com"
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+MERCHANT_LOGIN = os.getenv("MERCHANT_LOGIN")  # freelance_user_...
+MERCHANT_PASSWORD = os.getenv("MERCHANT_PASSWORD")  # 32 chars password
+MERCHANT_DOMAIN = os.getenv("MERCHANT_DOMAIN", "www.massagesobi.com")
 
-PRODUCT_NAME = "Massage Course"
-AMOUNT = 290
+PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Massage Course")
+AMOUNT = float(os.getenv("AMOUNT", "290.00"))
 CURRENCY = "UAH"
 
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-SERVICE_URL = os.getenv("SERVICE_URL")  # https://yourdomain.com/wayforpay/callback
+SERVICE_URL = os.getenv("SERVICE_URL")  # https://yourapp.onrender.com/wayforpay/callback
+KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL")
 
-# --------------------------
-# TELEGRAM APP
-# --------------------------
-telegram_app = Application.builder().token(BOT_TOKEN).build()
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+
+if not all([BOT_TOKEN, WEBHOOK_TOKEN, CHANNEL_ID, MERCHANT_LOGIN, MERCHANT_PASSWORD, SERVICE_URL]):
+    raise RuntimeError("Missing ENV variables")
 
 app = FastAPI()
 
+telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# --------------------------
-# SIGNATURE FOR CREATE_INVOICE
-# --------------------------
-def generate_invoice_signature(data):
+
+# ======================================================================
+#                     WAYFORPAY SIGNATURE HELPERS
+# ======================================================================
+
+def wfp_invoice_signature(payload: dict) -> str:
+    """
+    Signature format from WayForPay docs:
+    merchantAccount;merchantDomainName;orderReference;orderDate;amount;currency;productName;productCount;productPrice
+    """
     parts = [
-        data["merchantAccount"],
-        data["merchantDomainName"],
-        data["orderReference"],
-        str(data["orderDate"]),
-        str(data["amount"]),
-        data["currency"],
+        payload["merchantAccount"],
+        payload["merchantDomainName"],
+        payload["orderReference"],
+        str(payload["orderDate"]),
+        str(payload["amount"]),
+        payload["currency"]
     ]
 
-    for p in data["productName"]:
-        parts.append(p)
+    parts += payload["productName"]
+    parts += [str(x) for x in payload["productCount"]]
+    parts += [str(x) for x in payload["productPrice"]]
 
-    for p in data["productCount"]:
-        parts.append(str(p))
-
-    for p in data["productPrice"]:
-        parts.append(str(p))
-
-    sign_string = ";".join(parts)
-
-    return hmac.new(
-        MERCHANT_PASSWORD.encode(),
-        sign_string.encode(),
-        hashlib.md5,
-    ).hexdigest()
+    msg = ";".join(parts)
+    return hmac.new(MERCHANT_PASSWORD.encode(), msg.encode(), hashlib.md5).hexdigest()
 
 
-# --------------------------
-# SIGNATURE CHECK CALLBACK
-# --------------------------
-def verify_callback_signature(body):
-    try:
-        parts = [
-            body["merchantAccount"],
-            body["orderReference"],
-            str(body["amount"]),
-            body["currency"],
-            body["authCode"],
-            body["cardPan"],
-            body["transactionStatus"],
-            str(body["reasonCode"]),
-        ]
-
-        sign_str = ";".join(parts)
-
-        expected = hmac.new(
-            MERCHANT_PASSWORD.encode(),
-            sign_str.encode(),
-            hashlib.md5
-        ).hexdigest()
-
-        return expected == body["merchantSignature"]
-
-    except Exception:
+def wfp_callback_valid(body: dict) -> bool:
+    """
+    WayForPay callback signature:
+    merchantAccount;orderReference;amount;currency;authCode;cardPan;transactionStatus;reasonCode
+    """
+    required = [
+        "merchantAccount", "orderReference", "amount", "currency",
+        "authCode", "cardPan", "transactionStatus", "reasonCode", "merchantSignature"
+    ]
+    if not all(k in body for k in required):
         return False
 
+    parts = [
+        body["merchantAccount"],
+        body["orderReference"],
+        str(body["amount"]),
+        body["currency"],
+        body["authCode"],
+        body["cardPan"],
+        body["transactionStatus"],
+        body["reasonCode"],
+    ]
 
-# --------------------------
-# /start
-# --------------------------
+    msg = ";".join(parts)
+    expected = hmac.new(MERCHANT_PASSWORD.encode(), msg.encode(), hashlib.md5).hexdigest()
+    return expected == body["merchantSignature"]
+
+
+def wfp_response_signature(order_ref: str, status: str, ts: int) -> str:
+    msg = f"{order_ref};{status};{ts}"
+    return hmac.new(MERCHANT_PASSWORD.encode(), msg.encode(), hashlib.md5).hexdigest()
+
+
+# ======================================================================
+#                              TELEGRAM BOT
+# ======================================================================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Оплатити курс", callback_data="pay")]
     ])
 
     await update.message.reply_text(
-        "Вітаю! Щоб отримати доступ до курсу – оплатіть натиснувши кнопку нижче:",
+        "Вітаю! 👋\nНатисніть кнопку, щоб оплатити курс.",
         reply_markup=keyboard
     )
 
@@ -110,113 +112,113 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 telegram_app.add_handler(CommandHandler("start", start))
 
 
-# --------------------------
-# PAY BUTTON PRESSED
-# --------------------------
-async def pay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def pay_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Creates invoice via API and sends user a payment link."""
     query = update.callback_query
     await query.answer()
 
     user = query.from_user
-    order_reference = f"order_{user.id}_{int(time.time())}"
+    order_ref = f"order_{user.id}_{int(time.time())}"
+    order_date = int(time.time())
 
     payload = {
         "transactionType": "CREATE_INVOICE",
-        "merchantAccount": MERCHANT_ACCOUNT,
+        "merchantAccount": MERCHANT_LOGIN,
         "merchantDomainName": MERCHANT_DOMAIN,
-        "orderReference": order_reference,
-        "orderDate": int(time.time()),
+        "orderReference": order_ref,
+        "orderDate": order_date,
         "amount": AMOUNT,
         "currency": CURRENCY,
         "productName": [PRODUCT_NAME],
         "productCount": [1],
         "productPrice": [AMOUNT],
         "language": "UA",
-        "apiVersion": 1,
-        "serviceUrl": SERVICE_URL,
+        "serviceUrl": SERVICE_URL
     }
 
-    payload["merchantSignature"] = generate_invoice_signature(payload)
+    payload["merchantSignature"] = wfp_invoice_signature(payload)
 
     async with aiohttp.ClientSession() as session:
         async with session.post("https://api.wayforpay.com/api", json=payload) as resp:
             data = await resp.json()
 
-    if data.get("reasonCode") != 1100:
-        await query.message.reply_text("❌ Помилка створення інвойсу.")
+    print("WFP RESPONSE:", data)
+
+    if data.get("reasonCode") not in (1100, 1101, 1102):
+        await query.message.reply_text("❌ Помилка при створенні інвойсу.")
         return
 
     invoice_url = data.get("invoiceUrl")
-
     await query.message.reply_text(
-        f"Оплатіть, будь ласка, за посиланням:\n{invoice_url}\n\n"
-        "Після успішної оплати Ви автоматично отримаєте доступ ❤️"
+        f"Для оплати перейдіть за посиланням:\n{invoice_url}"
     )
 
 
-telegram_app.add_handler(CallbackQueryHandler(pay_callback, pattern="^pay$"))
+telegram_app.add_handler(CallbackQueryHandler(pay_handler, pattern="^pay$"))
 
 
-# --------------------------
-# CALLBACK FROM WAYFORPAY
-# --------------------------
+# ======================================================================
+#                      WAYFORPAY CALLBACK ENDPOINT
+# ======================================================================
+
 @app.post("/wayforpay/callback")
-async def wayforpay_callback(request: Request):
+async def wfp_callback(request: Request):
     body = await request.json()
+    print("WFP CALLBACK:", body)
 
-    print("WAYFORPAY CALLBACK:", body)
+    if not wfp_callback_valid(body):
+        return {"code": "INVALID_SIGNATURE"}
 
-    if not verify_callback_signature(body):
-        print("❌ Invalid signature")
-        return {"code": "error", "message": "invalid signature"}
-
+    order_ref = body["orderReference"]
     status = body.get("transactionStatus")
-    order_ref = body.get("orderReference")
 
-    # orderReference = order_userId_timestamp
-    parts = order_ref.split("_")
-    user_id = int(parts[1])
+    # Extract Telegram ID from orderRef
+    try:
+        _, tg_id, _ = order_ref.split("_")
+        tg_id = int(tg_id)
+    except:
+        return {"code": "BAD_ORDER_REF"}
 
     if status == "Approved":
-        # видаємо доступ у канал
-        invite_link = await telegram_app.bot.create_chat_invite_link(
-            chat_id=CHANNEL_ID,
-            member_limit=1
-        )
-
+        # create one-time link
+        invite = await telegram_app.bot.create_chat_invite_link(CHANNEL_ID, member_limit=1)
         await telegram_app.bot.send_message(
-            chat_id=user_id,
-            text=(
-                "🎉 Оплата отримана!\n\n"
-                "Ваш доступ до курсу:\n"
-                f"{invite_link.invite_link}"
-            )
+            tg_id,
+            f"🎉 Оплата успішна!\nОсь ваш доступ до каналу:\n{invite.invite_link}"
         )
 
-    # WayForPay expects response
-    return {
-        "orderReference": order_ref,
-        "status": "accept",
-        "time": int(time.time())
-    }
+    ts = int(time.time())
+    signature = wfp_response_signature(order_ref, "accept", ts)
+
+    return {"orderReference": order_ref, "status": "accept", "time": ts, "signature": signature}
 
 
-# --------------------------
-# TELEGRAM WEBHOOK
-# --------------------------
+# ======================================================================
+#                        TELEGRAM WEBHOOK ENDPOINT
+# ======================================================================
+
 @app.post("/telegram/webhook/{token}")
 async def telegram_webhook(token: str, request: Request):
     if token != WEBHOOK_TOKEN:
-        return {"error": "forbidden"}
+        raise HTTPException(status_code=403)
 
-    update = Update.de_json(await request.json(), telegram_app.bot)
+    data = await request.json()
+    update = Update.de_json(data, telegram_app.bot)
     await telegram_app.process_update(update)
+
     return {"ok": True}
 
 
-# --------------------------
-# Root
-# --------------------------
+# ======================================================================
+#                             STARTUP
+# ======================================================================
+
+@app.on_event("startup")
+async def startup_event():
+    await telegram_app.initialize()
+    await telegram_app.start()
+
+
 @app.get("/")
 async def root():
     return {"status": "running"}
