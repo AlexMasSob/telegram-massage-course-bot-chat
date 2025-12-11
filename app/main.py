@@ -1,6 +1,4 @@
 import os
-import hmac
-import hashlib
 import time
 import re
 import asyncio
@@ -8,6 +6,7 @@ import aiohttp
 import aiosqlite
 
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
@@ -25,19 +24,16 @@ WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
 
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # ID каналу з уроками
 
-# WayForPay
-MERCHANT_LOGIN = os.getenv("MERCHANT_LOGIN") or os.getenv("WAYFORPAY_MERCHANT")
-MERCHANT_SECRET_KEY = os.getenv("MERCHANT_SECRET_KEY")  # 40-символьний SecretKey
-MERCHANT_DOMAIN = os.getenv("MERCHANT_DOMAIN", "www.massagesobi.com")
+# Статичне посилання на кнопку WayForPay (тип A, яке ти показував)
+PAYMENT_BUTTON_URL = os.getenv(
+    "PAYMENT_BUTTON_URL",
+    "https://secure.wayforpay.com/button/ba6a191c6ba56"  # заміни на своє реальне посилання
+)
 
 PRODUCT_ID = int(os.getenv("PRODUCT_ID", "1"))
 PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Курс самомасажу")
 AMOUNT = float(os.getenv("AMOUNT", "290.00"))
 CURRENCY = os.getenv("CURRENCY", "UAH")
-
-# URL твого сервісу для callback WayForPay
-# Наприклад: https://telegram-massage-course-bot-chat.onrender.com/wayforpay/callback
-SERVICE_URL = os.getenv("SERVICE_URL")
 
 # Для антизасинання
 KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL")
@@ -46,16 +42,15 @@ KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "268351523"))
 SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID", "-5032163085"))
 
+# Ім'я бота (для лінку повернення зі сторінки успішної оплати)
+BOT_USERNAME = os.getenv("BOT_USERNAME", "Massagesobi_bot")
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing")
 if not CHANNEL_ID:
     raise RuntimeError("CHANNEL_ID missing")
 if not KEEP_ALIVE_URL:
     raise RuntimeError("KEEP_ALIVE_URL missing")
-if not MERCHANT_LOGIN or not MERCHANT_SECRET_KEY:
-    raise RuntimeError("MERCHANT_LOGIN or MERCHANT_SECRET_KEY missing")
-if not SERVICE_URL:
-    raise RuntimeError("SERVICE_URL missing")
 
 app = FastAPI()
 
@@ -77,61 +72,73 @@ async def get_db() -> aiosqlite.Connection:
 async def init_db():
     conn = await get_db()
 
+    # --- users ---
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            telegram_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            joined_at INTEGER,
+            telegram_id   INTEGER PRIMARY KEY,
+            username      TEXT,
+            first_name    TEXT,
+            joined_at     INTEGER,
             last_activity INTEGER,
-            has_access INTEGER DEFAULT 0
+            has_access    INTEGER DEFAULT 0,
+            awaiting_payment INTEGER DEFAULT 0
         )
     """)
 
+    # Якщо таблиця вже була без awaiting_payment — пробуємо додати
+    try:
+        await conn.execute("ALTER TABLE users ADD COLUMN awaiting_payment INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    # --- products ---
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS products (
-            id INTEGER PRIMARY KEY,
-            name TEXT,
-            price REAL,
-            currency TEXT,
+            id        INTEGER PRIMARY KEY,
+            name      TEXT,
+            price     REAL,
+            currency  TEXT,
             is_active INTEGER DEFAULT 1
         )
     """)
 
+    # --- purchases ---
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS purchases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id INTEGER,
-            product_id INTEGER,
-            amount REAL,
-            currency TEXT,
-            status TEXT,
-            order_ref TEXT UNIQUE,
-            created_at INTEGER,
-            paid_at INTEGER
+            product_id  INTEGER,
+            amount      REAL,
+            currency    TEXT,
+            status      TEXT,
+            order_ref   TEXT UNIQUE,
+            created_at  INTEGER,
+            paid_at     INTEGER
         )
     """)
 
+    # --- access_links ---
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS access_links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id INTEGER,
-            product_id INTEGER,
+            product_id  INTEGER,
             invite_link TEXT,
-            created_at INTEGER,
-            used INTEGER DEFAULT 0
+            created_at  INTEGER,
+            used        INTEGER DEFAULT 0
         )
     """)
 
+    # --- messages (для підтримки) ---
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id INTEGER,
-            is_admin INTEGER,
-            direction TEXT,
+            is_admin    INTEGER,
+            direction   TEXT,
             content_type TEXT,
-            text TEXT,
-            timestamp INTEGER
+            text        TEXT,
+            timestamp   INTEGER
         )
     """)
 
@@ -151,8 +158,8 @@ async def upsert_user(telegram_id: int, username: str | None, first_name: str | 
     now = int(time.time())
 
     await conn.execute("""
-        INSERT OR IGNORE INTO users (telegram_id, username, first_name, joined_at, last_activity, has_access)
-        VALUES (?, ?, ?, ?, ?, 0)
+        INSERT OR IGNORE INTO users (telegram_id, username, first_name, joined_at, last_activity, has_access, awaiting_payment)
+        VALUES (?, ?, ?, ?, ?, 0, 0)
     """, (telegram_id, username, first_name, now, now))
 
     await conn.execute("""
@@ -182,31 +189,6 @@ async def mark_access(telegram_id: int, product_id: int, invite_link: str | None
     await conn.commit()
 
 
-async def create_purchase_pending(telegram_id: int, product_id: int, amount: float, currency: str, order_ref: str):
-    conn = await get_db()
-    now = int(time.time())
-
-    await conn.execute("""
-        INSERT INTO purchases (telegram_id, product_id, amount, currency, status, order_ref, created_at, paid_at)
-        VALUES (?, ?, ?, ?, 'pending', ?, ?, NULL)
-    """, (telegram_id, product_id, amount, currency, order_ref, now))
-
-    await conn.commit()
-
-
-async def mark_purchase_paid(order_ref: str):
-    conn = await get_db()
-    now = int(time.time())
-
-    await conn.execute("""
-        UPDATE purchases
-        SET status='approved', paid_at=?
-        WHERE order_ref=?
-    """, (now, order_ref))
-
-    await conn.commit()
-
-
 async def log_message(telegram_id: int, is_admin: int, direction: str, content_type: str, text: str | None):
     conn = await get_db()
     now = int(time.time())
@@ -229,83 +211,6 @@ async def keep_alive():
         except Exception as e:
             print("keep_alive error:", e)
         await asyncio.sleep(300)
-
-
-# ===================== WAYFORPAY HELPERS =====================
-
-def wfp_sign(msg: str) -> str:
-    """
-    Підпис WayForPay:
-    hash_hmac('md5', msg, SECRET_KEY)
-    """
-    return hmac.new(MERCHANT_SECRET_KEY.encode(), msg.encode(), hashlib.md5).hexdigest()
-
-
-def wfp_invoice_signature(payload: dict) -> str:
-    # WayForPay дуже чутливий до формату суми.
-    # Насильно форматуємо amount і productPrice як 290.00 (2 знаки після крапки).
-    def fmt_amount(x) -> str:
-        return f"{float(x):.2f}"
-
-    parts = [
-        payload["merchantAccount"],
-        payload["merchantDomainName"],
-        payload["orderReference"],
-        str(payload["orderDate"]),
-        fmt_amount(payload["amount"]),
-        payload["currency"],
-    ]
-
-    for p in payload["productName"]:
-        parts.append(str(p))
-    for c in payload["productCount"]:
-        parts.append(str(c))
-    for pr in payload["productPrice"]:
-        parts.append(fmt_amount(pr))
-
-    msg = ";".join(parts)
-    sig = wfp_sign(msg)
-    print("WFP INVOICE STRING:", msg)
-    print("WFP INVOICE SIGNATURE:", sig)
-    return sig
-
-
-def wfp_callback_valid(body: dict) -> bool:
-    # Параметри для підпису колбеку (serviceUrl)
-    required = [
-        "merchantAccount", "orderReference", "amount", "currency",
-        "authCode", "cardPan", "transactionStatus", "reasonCode",
-        "merchantSignature"
-    ]
-    if not all(k in body for k in required):
-        print("WFP CALLBACK: missing fields")
-        return False
-
-    parts = [
-        body["merchantAccount"],
-        body["orderReference"],
-        str(body["amount"]),
-        body["currency"],
-        body["authCode"],
-        body["cardPan"],
-        body["transactionStatus"],
-        body["reasonCode"],
-    ]
-
-    msg = ";".join(parts)
-    expected = wfp_sign(msg)
-    print("WFP CALLBACK STRING:", msg)
-    print("WFP CALLBACK EXPECTED:", expected)
-    print("WFP CALLBACK GOT:", body["merchantSignature"])
-    return expected == body["merchantSignature"]
-
-
-def wfp_response_signature(order_ref: str, status: str, ts: int) -> str:
-    msg = f"{order_ref};{status};{ts}"
-    sig = wfp_sign(msg)
-    print("WFP RESPONSE STRING:", msg)
-    print("WFP RESPONSE SIGNATURE:", sig)
-    return sig
 
 
 # ===================== STARTUP =====================
@@ -340,7 +245,63 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await upsert_user(user.id, user.username, user.first_name)
 
-    args = context.args
+    args = context.args or []
+
+    # --- Кейс: повернення зі сторінки "Оплата успішна" (deep-link ?start=paid) ---
+    if args and args[0].startswith("paid"):
+        conn = await get_db()
+        cur = await conn.execute(
+            "SELECT awaiting_payment FROM users WHERE telegram_id = ?",
+            (user.id,)
+        )
+        row = await cur.fetchone()
+
+        # Якщо ми не очікуємо оплату — не даємо доступ автоматом
+        if not row or row["awaiting_payment"] == 0:
+            await update.message.reply_text(
+                "Я поки не бачу активної оплати, пов'язаної з Вашим акаунтом.\n\n"
+                "Якщо Ви оплатили курс, але не отримали доступ — напишіть, будь ласка, у підтримку, "
+                "я все перевірю вручну 🙏",
+                parse_mode="HTML"
+            )
+            return
+
+        now = int(time.time())
+        order_ref = f"button_{user.id}_{now}"
+
+        # Фіксуємо покупку як схвалену (для статистики)
+        await conn.execute("""
+            INSERT INTO purchases (telegram_id, product_id, amount, currency, status, order_ref, created_at, paid_at)
+            VALUES (?, ?, ?, ?, 'approved', ?, ?, ?)
+        """, (user.id, PRODUCT_ID, AMOUNT, CURRENCY, order_ref, now, now))
+
+        await conn.execute("""
+            UPDATE users
+            SET awaiting_payment = 0, has_access = 1, last_activity = ?
+            WHERE telegram_id = ?
+        """, (now, user.id))
+
+        await conn.commit()
+
+        try:
+            link = await create_one_time_link(user.id, PRODUCT_ID)
+            await update.message.reply_text(
+                "🎉 <b>Оплата успішна!</b>\n\n"
+                "Ось Ваш <b>особистий доступ</b> у приватний канал з уроками:\n"
+                f"{link}",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                "Оплату зафіксовано, але сталася помилка при створенні доступу.\n"
+                "Напишіть, будь ласка, у підтримку, і я все вирішу вручну 🙏\n\n"
+                f"<code>{e}</code>",
+                parse_mode="HTML"
+            )
+
+        return
+
+    # --- Звичайний /start або deep-link ?start=site ---
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Оплатити курс", callback_data=f"pay:{PRODUCT_ID}")],
@@ -352,13 +313,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Вітаю! 👋\n\n"
             "Ви перейшли з сайту <b>Сам Собі Масажист</b>.\n\n"
             "Натисніть кнопку нижче, щоб оплатити курс і отримати доступ "
-            "у приватний канал з відеоуроками ❤️"
+            "у приватний канал з відеоуроками ❤️\n\n"
+            "<b>Після оплати Вас перекине на сторінку з кнопкою повернення до бота. "
+            "Натисніть її, і бот видасть доступ автоматично.</b>"
         )
     else:
         txt = (
             "Вітаю! 👋\n\n"
-            "Це бот доступу до курсу самомасажу.\n"
-            "Натисніть кнопку нижче, щоб отримати доступ.\n\n"
+            "Це бот доступу до курсу самомасажу.\n\n"
+            "1️⃣ Натисніть кнопку <b>“Оплатити курс”</b>\n"
+            "2️⃣ Оплатіть на захищеній сторінці WayForPay\n"
+            "3️⃣ Після оплати Вас перекине на сторінку з кнопкою повернення до бота\n"
+            "4️⃣ Натисніть її — і бот автоматично видасть доступ у приватний канал ❤️\n\n"
             "<b>Після оплати Ви автоматично отримаєте особистий доступ у приватний канал.</b>"
         )
 
@@ -450,78 +416,41 @@ async def testpay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 telegram_app.add_handler(CallbackQueryHandler(testpay_cb, pattern=r"^testpay:"))
 
 
-# ===================== PAYMENT (WayForPay CREATE_INVOICE) =====================
+# ===================== PAYMENT (WayForPay BUTTON FLOW) =====================
 
 async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Логіка для кнопки "Оплатити курс":
+    - помічаємо користувача як того, хто "очікує оплату"
+    - відправляємо йому лінк на кнопку WayForPay (STATIC)
+    - після успішної оплати WayForPay перекидає на /payment/success
+      де є кнопка повернення в бота з ?start=paid
+    """
     query = update.callback_query
     await query.answer()
 
     user = query.from_user
     await upsert_user(user.id, user.username, user.first_name)
 
-    data = query.data.split(":")
-    product_id = int(data[1]) if len(data) > 1 else PRODUCT_ID
-
-    order_ref = f"order_{product_id}_{user.id}_{int(time.time())}"
-    await create_purchase_pending(user.id, product_id, AMOUNT, CURRENCY, order_ref)
-
-    order_date = int(time.time())
-
-    payload = {
-        "transactionType": "CREATE_INVOICE",
-        "merchantAccount": MERCHANT_LOGIN,
-        "merchantDomainName": MERCHANT_DOMAIN,
-        "orderReference": order_ref,
-        "orderDate": order_date,
-        "amount": AMOUNT,
-        "currency": CURRENCY,
-        "productName": [PRODUCT_NAME],
-        "productCount": [1],
-        "productPrice": [AMOUNT],
-        "language": "UA",
-        "apiVersion": 1,
-        # важливо: щоб WayForPay шле POST на наш callback
-        "serviceUrl": SERVICE_URL,
-    }
-
-    payload["merchantSignature"] = wfp_invoice_signature(payload)
-
-    print("Sending WayForPay payload:", payload)
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post("https://api.wayforpay.com/api", json=payload) as resp:
-            ct = resp.headers.get("Content-Type", "")
-            if "application/json" in ct:
-                data = await resp.json()
-            else:
-                text = await resp.text()
-                print("WayForPay non-JSON response:", text)
-                await query.message.reply_text("Помилка при створенні інвойсу.")
-                return
-
-    print("WayForPay response:", data)
-
-    if data.get("reasonCode") not in (1100, 1101, 1102):
-        await query.message.reply_text(
-            f"Помилка при створенні інвойсу:\n<code>{data}</code>",
-            parse_mode="HTML"
-        )
-        return
-
-    invoice = data.get("invoiceUrl")
-    if not invoice:
-        await query.message.reply_text("Помилка при створенні інвойсу.")
-        return
+    conn = await get_db()
+    await conn.execute(
+        "UPDATE users SET awaiting_payment = 1 WHERE telegram_id = ?",
+        (user.id,)
+    )
+    await conn.commit()
 
     txt = (
-        "<b>Оплата курсу</b>\n\n"
-        "Щоб сплатити курс, перейдіть за посиланням нижче:\n\n"
-        f"{invoice}\n\n"
-        "Після успішної оплати Ви автоматично отримаєте доступ у приватний канал з уроками.\n"
-        "Якщо оплата не пройде, WayForPay покаже помилку на сторінці оплати."
+        "<b>Крок 1.</b> Перейдіть за посиланням нижче та сплатіть курс на захищеній сторінці WayForPay.\n\n"
+        "<b>Крок 2.</b> Після успішної оплати Вас автоматично перекине на сторінку з підтвердженням.\n\n"
+        "<b>Крок 3.</b> На цій сторінці натисніть кнопку «Отримати доступ до курсу» — Ви повернетеся у бота, "
+        "і бот автоматично видасть особистий доступ у приватний канал ❤️"
     )
 
-    await query.message.reply_text(txt, parse_mode="HTML")
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Перейти до оплати", url=PAYMENT_BUTTON_URL)]
+    ])
+
+    await query.message.reply_text(txt, reply_markup=keyboard, parse_mode="HTML")
 
 
 telegram_app.add_handler(CallbackQueryHandler(pay_cb, pattern=r"^pay:"))
@@ -1019,89 +948,56 @@ async def user_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 telegram_app.add_handler(MessageHandler(filters.ALL, user_msg_handler))
 
 
-# ===================== WAYFORPAY CALLBACK =====================
+# ===================== WAYFORPAY CALLBACK (НЕ ВИКОРИСТОВУЄТЬСЯ У ЦІЙ ЗВ'ЯЗЦІ) =====================
 
 @app.post("/wayforpay/callback")
 async def wfp_callback(request: Request):
+    """
+    Залишаємо ендпоінт про всяк випадок, але в поточній схемі він не використовується.
+    Якщо колись знову підемо в API WayForPay — можна дописати логіку тут.
+    """
     body = await request.json()
-
-    print("WayForPay callback body:", body)
-
-    if not wfp_callback_valid(body):
-        return {"code": "invalid-signature"}
-
-    order_ref = body.get("orderReference")
-    status = body.get("transactionStatus")
-
-    match = re.match(r"order_(\d+)_(\d+)_(\d+)", order_ref or "")
-    if not match:
-        return {"code": "bad-order-ref"}
-
-    product_id = int(match.group(1))
-    telegram_id = int(match.group(2))
-
-    if status == "Approved":
-        await mark_purchase_paid(order_ref)
-        link = await create_one_time_link(telegram_id, product_id)
-
-        await telegram_app.bot.send_message(
-            telegram_id,
-            (
-                "🎉 <b>Оплата успішна!</b>\n\n"
-                "Ось Ваш <b>особистий доступ</b> у приватний канал з уроками:\n"
-                f"{link}"
-            ),
-            parse_mode="HTML"
-        )
-
-    ts = int(time.time())
-    signature = wfp_response_signature(order_ref, "accept", ts)
-
-    return {
-        "orderReference": order_ref,
-        "status": "accept",
-        "time": ts,
-        "signature": signature
-    }
+    print("WayForPay callback (ignored in current flow):", body)
+    return {"status": "ok"}
 
 
-# ===================== TEST WFP (для діагностики) =====================
+# ===================== HTML СТОРІНКА УСПІШНОЇ ОПЛАТИ =====================
 
-@app.get("/test-wfp")
-async def test_wfp():
-    order_ref = f"test_{int(time.time())}"
-    order_date = int(time.time())
-
-    payload = {
-        "transactionType": "CREATE_INVOICE",
-        "merchantAccount": MERCHANT_LOGIN,
-        "merchantDomainName": MERCHANT_DOMAIN,
-        "orderReference": order_ref,
-        "orderDate": order_date,
-        "amount": AMOUNT,
-        "currency": CURRENCY,
-        "productName": [PRODUCT_NAME],
-        "productCount": [1],
-        "productPrice": [AMOUNT],
-        "language": "UA",
-        "apiVersion": 1,
-        "serviceUrl": SERVICE_URL,
-    }
-
-    payload["merchantSignature"] = wfp_invoice_signature(payload)
-
-    print("TEST WFP PAYLOAD:", payload)
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post("https://api.wayforpay.com/api", json=payload) as resp:
-            ct = resp.headers.get("Content-Type", "")
-            if "application/json" in ct:
-                data = await resp.json()
-            else:
-                data = {"raw": await resp.text()}
-
-    print("WAYFORPAY RAW RESPONSE:", data)
-    return data
+@app.get("/payment/success", response_class=HTMLResponse)
+async def payment_success():
+    """
+    Цю адресу вкажи в WayForPay як "Успішний платіж / Approved URL":
+    https://your-render-app.onrender.com/payment/success
+    """
+    return f"""
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8" />
+  <title>Оплата успішна</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+</head>
+<body style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#fafafa; margin:0; padding:0;">
+  <div style="max-width:480px;margin:40px auto;padding:24px;background:#ffffff;border-radius:16px;box-shadow:0 8px 24px rgba(15,23,42,0.08);text-align:center;">
+    <h1 style="margin-top:0;margin-bottom:12px;font-size:24px;">Оплата успішна ✅</h1>
+    <p style="margin:0 0 12px;font-size:16px;line-height:1.5;">
+      Дякую за оплату курсу <b>"{PRODUCT_NAME}"</b> ❤️
+    </p>
+    <p style="margin:0 0 20px;font-size:15px;line-height:1.5;">
+      Щоб отримати доступ до відеоуроків, натисніть кнопку нижче — Ви повернетеся в Telegram-бота, і він автоматично видасть доступ у приватний канал.
+    </p>
+    <a href="https://t.me/{BOT_USERNAME}?start=paid"
+       style="display:inline-block;padding:12px 24px;background:#0088cc;color:#ffffff;text-decoration:none;border-radius:999px;font-weight:600;font-size:15px;">
+      Отримати доступ до курсу
+    </a>
+    <p style="margin-top:18px;font-size:13px;color:#555;line-height:1.4;">
+      Якщо кнопка не відкриває Telegram, знайдіть бота <b>@{BOT_USERNAME}</b> вручну
+      та надішліть йому команду <code>/start paid</code>.
+    </p>
+  </div>
+</body>
+</html>
+"""
 
 
 # ===================== TELEGRAM WEBHOOK =====================
