@@ -242,13 +242,17 @@ def wfp_sign(msg: str) -> str:
 
 
 def wfp_invoice_signature(payload: dict) -> str:
-    # Порядок згідно з документацією WayForPay (CreateInvoice)
+    # WayForPay дуже чутливий до формату суми.
+    # Насильно форматуємо amount і productPrice як 290.00 (2 знаки після крапки).
+    def fmt_amount(x) -> str:
+        return f"{float(x):.2f}"
+
     parts = [
         payload["merchantAccount"],
         payload["merchantDomainName"],
         payload["orderReference"],
         str(payload["orderDate"]),
-        str(payload["amount"]),
+        fmt_amount(payload["amount"]),
         payload["currency"],
     ]
 
@@ -257,7 +261,7 @@ def wfp_invoice_signature(payload: dict) -> str:
     for c in payload["productCount"]:
         parts.append(str(c))
     for pr in payload["productPrice"]:
-        parts.append(str(pr))
+        parts.append(fmt_amount(pr))
 
     msg = ";".join(parts)
     sig = wfp_sign(msg)
