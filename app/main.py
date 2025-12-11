@@ -1,9 +1,9 @@
 import os
 import time
-import re
 import asyncio
 import aiohttp
 import aiosqlite
+from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
@@ -24,10 +24,10 @@ WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
 
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # ID каналу з уроками
 
-# Статичне посилання на кнопку WayForPay (тип A, яке ти показував)
+# Статичне посилання на кнопку WayForPay
 PAYMENT_BUTTON_URL = os.getenv(
     "PAYMENT_BUTTON_URL",
-    "https://secure.wayforpay.com/button/ba6a191c6ba56"  # заміни на своє реальне посилання
+    "https://secure.wayforpay.com/button/ba6a191c6ba56"  # заміни на своє, якщо треба
 )
 
 PRODUCT_ID = int(os.getenv("PRODUCT_ID", "1"))
@@ -42,7 +42,7 @@ KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "268351523"))
 SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID", "-5032163085"))
 
-# Ім'я бота (для лінку повернення зі сторінки успішної оплати)
+# Юзернейм бота (для deep-link назад у бота)
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Massagesobi_bot")
 
 if not BOT_TOKEN:
@@ -58,6 +58,7 @@ DB_PATH = "database.db"
 db: aiosqlite.Connection | None = None
 
 telegram_app = Application.builder().token(BOT_TOKEN).build()
+
 
 # ===================== DB INIT =====================
 
@@ -75,17 +76,17 @@ async def init_db():
     # --- users ---
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            telegram_id   INTEGER PRIMARY KEY,
-            username      TEXT,
-            first_name    TEXT,
-            joined_at     INTEGER,
-            last_activity INTEGER,
-            has_access    INTEGER DEFAULT 0,
+            telegram_id      INTEGER PRIMARY KEY,
+            username         TEXT,
+            first_name       TEXT,
+            joined_at        INTEGER,
+            last_activity    INTEGER,
+            has_access       INTEGER DEFAULT 0,
             awaiting_payment INTEGER DEFAULT 0
         )
     """)
 
-    # Якщо таблиця вже була без awaiting_payment — пробуємо додати
+    # Якщо таблиця була без awaiting_payment — спробуємо додати
     try:
         await conn.execute("ALTER TABLE users ADD COLUMN awaiting_payment INTEGER DEFAULT 0")
     except Exception:
@@ -129,16 +130,16 @@ async def init_db():
         )
     """)
 
-    # --- messages (для підтримки) ---
+    # --- messages (підтримка) ---
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER,
-            is_admin    INTEGER,
-            direction   TEXT,
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id  INTEGER,
+            is_admin     INTEGER,
+            direction    TEXT,
             content_type TEXT,
-            text        TEXT,
-            timestamp   INTEGER
+            text         TEXT,
+            timestamp    INTEGER
         )
     """)
 
@@ -158,7 +159,8 @@ async def upsert_user(telegram_id: int, username: str | None, first_name: str | 
     now = int(time.time())
 
     await conn.execute("""
-        INSERT OR IGNORE INTO users (telegram_id, username, first_name, joined_at, last_activity, has_access, awaiting_payment)
+        INSERT OR IGNORE INTO users
+            (telegram_id, username, first_name, joined_at, last_activity, has_access, awaiting_payment)
         VALUES (?, ?, ?, ?, ?, 0, 0)
     """, (telegram_id, username, first_name, now, now))
 
@@ -247,7 +249,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args or []
 
-    # --- Кейс: повернення зі сторінки "Оплата успішна" (deep-link ?start=paid) ---
+    # --- Повернення зі сторінки успішної оплати (?start=paid) ---
     if args and args[0].startswith("paid"):
         conn = await get_db()
         cur = await conn.execute(
@@ -256,7 +258,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         row = await cur.fetchone()
 
-        # Якщо ми не очікуємо оплату — не даємо доступ автоматом
         if not row or row["awaiting_payment"] == 0:
             await update.message.reply_text(
                 "Я поки не бачу активної оплати, пов'язаної з Вашим акаунтом.\n\n"
@@ -305,7 +306,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Оплатити курс", callback_data=f"pay:{PRODUCT_ID}")],
-        [InlineKeyboardButton("🧪 Тестова оплата", callback_data=f"testpay:{PRODUCT_ID}")],
     ])
 
     if args and args[0] == "site":
@@ -323,8 +323,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Це бот доступу до курсу самомасажу.\n\n"
             "1️⃣ Натисніть кнопку <b>“Оплатити курс”</b>\n"
             "2️⃣ Оплатіть на захищеній сторінці WayForPay\n"
-            "3️⃣ Після оплати Вас перекине на сторінку з кнопкою повернення до бота\n"
-            "4️⃣ Натисніть її — і бот автоматично видасть доступ у приватний канал ❤️\n\n"
+            "3️⃣ Після оплати Вас перекине на сторінку з підтвердженням\n"
+            "4️⃣ На цій сторінці натисніть кнопку повернення у бота — і "
+            "бот автоматично видасть доступ у приватний канал ❤️\n\n"
             "<b>Після оплати Ви автоматично отримаєте особистий доступ у приватний канал.</b>"
         )
 
@@ -379,51 +380,14 @@ async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 telegram_app.add_handler(CommandHandler("access", access_cmd))
 
 
-# ===================== TESTPAY =====================
-
-async def testpay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user = query.from_user
-    await upsert_user(user.id, user.username, user.first_name)
-
-    data = query.data.split(":")
-    product_id = int(data[1]) if len(data) > 1 else PRODUCT_ID
-
-    try:
-        link = await create_one_time_link(user.id, product_id)
-
-        await telegram_app.bot.send_message(
-            chat_id=user.id,
-            text=(
-                "🧪 <b>Тестова оплата успішна!</b>\n\n"
-                "Ось Ваш <b>особистий доступ</b> у канал з уроками:\n"
-                f"{link}"
-            ),
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        await query.message.reply_text(
-            f"Помилка:\n<code>{e}</code>",
-            parse_mode="HTML"
-        )
-        return
-
-    await query.message.reply_text("Готово! 🎉")
-
-
-telegram_app.add_handler(CallbackQueryHandler(testpay_cb, pattern=r"^testpay:"))
-
-
 # ===================== PAYMENT (WayForPay BUTTON FLOW) =====================
 
 async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Логіка для кнопки "Оплатити курс":
-    - помічаємо користувача як того, хто "очікує оплату"
-    - відправляємо йому лінк на кнопку WayForPay (STATIC)
-    - після успішної оплати WayForPay перекидає на /payment/success
+    Кнопка "Оплатити курс":
+    - помічаємо користувача як такого, що очікує оплату
+    - відправляємо йому лінк на статичну кнопку WayForPay
+    - після оплати WayForPay веде на /payment/success (Approved URL),
       де є кнопка повернення в бота з ?start=paid
     """
     query = update.callback_query
@@ -948,56 +912,59 @@ async def user_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 telegram_app.add_handler(MessageHandler(filters.ALL, user_msg_handler))
 
 
-# ===================== WAYFORPAY CALLBACK (НЕ ВИКОРИСТОВУЄТЬСЯ У ЦІЙ ЗВ'ЯЗЦІ) =====================
+# ===================== WAYFORPAY CALLBACK (резерв, не використовується) =====================
 
 @app.post("/wayforpay/callback")
 async def wfp_callback(request: Request):
-    """
-    Залишаємо ендпоінт про всяк випадок, але в поточній схемі він не використовується.
-    Якщо колись знову підемо в API WayForPay — можна дописати логіку тут.
-    """
     body = await request.json()
-    print("WayForPay callback (ignored in current flow):", body)
+    print("WayForPay callback (currently unused):", body)
     return {"status": "ok"}
 
 
 # ===================== HTML СТОРІНКА УСПІШНОЇ ОПЛАТИ =====================
 
+BASE_DIR = Path(__file__).resolve().parent
+SUCCESS_HTML_PATH = BASE_DIR / "static" / "success.html"
+
+
 @app.get("/payment/success", response_class=HTMLResponse)
-async def payment_success():
+async def payment_success_get():
     """
-    Цю адресу вкажи в WayForPay як "Успішний платіж / Approved URL":
+    Цю адресу вкажи в WayForPay як Approved URL:
     https://your-render-app.onrender.com/payment/success
     """
-    return f"""
+    if SUCCESS_HTML_PATH.exists():
+        html = SUCCESS_HTML_PATH.read_text(encoding="utf-8")
+        html = html.replace("__BOT_USERNAME__", BOT_USERNAME)
+        html = html.replace("__PRODUCT_NAME__", PRODUCT_NAME)
+        return HTMLResponse(content=html)
+    else:
+        # fallback, якщо файлу раптом немає
+        return HTMLResponse(
+            content=f"""
 <!DOCTYPE html>
 <html lang="uk">
-<head>
-  <meta charset="UTF-8" />
-  <title>Оплата успішна</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-</head>
-<body style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#fafafa; margin:0; padding:0;">
-  <div style="max-width:480px;margin:40px auto;padding:24px;background:#ffffff;border-radius:16px;box-shadow:0 8px 24px rgba(15,23,42,0.08);text-align:center;">
-    <h1 style="margin-top:0;margin-bottom:12px;font-size:24px;">Оплата успішна ✅</h1>
-    <p style="margin:0 0 12px;font-size:16px;line-height:1.5;">
-      Дякую за оплату курсу <b>"{PRODUCT_NAME}"</b> ❤️
-    </p>
-    <p style="margin:0 0 20px;font-size:15px;line-height:1.5;">
-      Щоб отримати доступ до відеоуроків, натисніть кнопку нижче — Ви повернетеся в Telegram-бота, і він автоматично видасть доступ у приватний канал.
-    </p>
-    <a href="https://t.me/{BOT_USERNAME}?start=paid"
-       style="display:inline-block;padding:12px 24px;background:#0088cc;color:#ffffff;text-decoration:none;border-radius:999px;font-weight:600;font-size:15px;">
-      Отримати доступ до курсу
-    </a>
-    <p style="margin-top:18px;font-size:13px;color:#555;line-height:1.4;">
-      Якщо кнопка не відкриває Telegram, знайдіть бота <b>@{BOT_USERNAME}</b> вручну
-      та надішліть йому команду <code>/start paid</code>.
-    </p>
-  </div>
+<head><meta charset="UTF-8"><title>Оплата успішна</title></head>
+<body>
+  <h1>Оплата успішна ✅</h1>
+  <p>Дякую за оплату курсу <b>{PRODUCT_NAME}</b>.</p>
+  <p><a href="https://t.me/{BOT_USERNAME}?start=paid">Отримати доступ до курсу</a></p>
 </body>
 </html>
-"""
+""",
+            status_code=200
+        )
+
+
+@app.post("/payment/success")
+async def payment_success_post(request: Request):
+    """
+    Якщо в WayForPay увімкнена галочка "Відправка POST на approvedUrl/declinedUrl",
+    вони будуть стукати сюди POST-запитом. Нам достатньо ввічливо відповісти.
+    """
+    body = await request.body()
+    print("WayForPay POST to /payment/success:", body.decode("utf-8", errors="ignore"))
+    return {"status": "ok"}
 
 
 # ===================== TELEGRAM WEBHOOK =====================
