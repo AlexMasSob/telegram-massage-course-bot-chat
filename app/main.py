@@ -925,54 +925,95 @@ async def wfp_callback(request: Request):
 
 
 # ===================== HTML СТОРІНКА УСПІШНОЇ ОПЛАТИ =====================
+
 @app.get("/payment/success", response_class=HTMLResponse)
 async def payment_success_get():
     """
-    Цю адресу вказуємо в WayForPay як Approved URL:
-    https://your-render-app.onrender.com/payment/success
+    Approved URL для WayForPay (GET).
+    Саме цю сторінку бачить користувач після успішної оплати.
     """
-    if SUCCESS_HTML_PATH.exists():
-        html = SUCCESS_HTML_PATH.read_text(encoding="utf-8")
-
-        # підставляємо динамічні значення
-        html = html.replace("__BOT_USERNAME__", BOT_USERNAME)
-        html = html.replace("__PRODUCT_NAME__", PRODUCT_NAME)
-
-        return HTMLResponse(content=html, status_code=200)
-
-    # fallback — якщо файл зник
-    return HTMLResponse(
-        content=f"""
+    html = f"""
 <!DOCTYPE html>
 <html lang="uk">
 <head>
   <meta charset="UTF-8">
   <title>Оплата успішна</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <style>
+    body {{
+      margin: 0;
+      padding: 0;
+      background: #f4f6f8;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    }}
+    .card {{
+      max-width: 420px;
+      margin: 60px auto;
+      background: #ffffff;
+      padding: 28px;
+      border-radius: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+      text-align: center;
+    }}
+    h1 {{
+      margin-top: 0;
+      font-size: 22px;
+    }}
+    p {{
+      font-size: 15px;
+      line-height: 1.5;
+      color: #333;
+    }}
+    a.button {{
+      display: inline-block;
+      margin-top: 18px;
+      padding: 14px 26px;
+      background: #0088cc;
+      color: #fff;
+      text-decoration: none;
+      border-radius: 999px;
+      font-weight: 600;
+    }}
+    a.button:active {{
+      transform: scale(0.97);
+    }}
+  </style>
 </head>
+
 <body>
-  <h1>Оплата успішна ✅</h1>
-  <p>Дякую за оплату курсу <b>{PRODUCT_NAME}</b>.</p>
-  <p>
-    <a href="https://t.me/{BOT_USERNAME}?start=paid">
+  <div class="card">
+    <h1>Оплата успішна ✅</h1>
+
+    <p>
+      Дякую за оплату курсу<br>
+      <b>{PRODUCT_NAME}</b>
+    </p>
+
+    <a class="button" href="https://t.me/{BOT_USERNAME}?start=paid">
       Отримати доступ до курсу
     </a>
-  </p>
+
+    <p style="margin-top:16px;font-size:13px;color:#666;">
+      Якщо кнопка не відкрилась — відкрийте Telegram і напишіть боту<br>
+      <b>@{BOT_USERNAME}</b>
+    </p>
+  </div>
 </body>
 </html>
-""",
-        status_code=200
-    )
-    @app.post("/payment/success")
+"""
+    return HTMLResponse(content=html, status_code=200)
+
+
+@app.post("/payment/success")
 async def payment_success_post(request: Request):
     """
-    WayForPay POST на approvedUrl.
-    Нічого не обробляємо — просто відповідаємо.
+    POST-запит від WayForPay (якщо увімкнена галочка).
+    Нам достатньо просто повернути OK.
     """
     body = await request.body()
-    print(
-        "WayForPay POST /payment/success:",
-        body.decode("utf-8", errors="ignore")
-    )
+    print("WayForPay POST to /payment/success:")
+    print(body.decode("utf-8", errors="ignore"))
     return {"status": "ok"}
 
 
