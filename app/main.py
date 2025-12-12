@@ -279,13 +279,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             VALUES (?, ?, ?, ?, 'approved', ?, ?, ?)
         """, (user.id, PRODUCT_ID, AMOUNT, CURRENCY, order_ref, now, now))
 
-        await conn.execute("""
-            UPDATE users
-            SET awaiting_payment = 0, has_access = 1, last_activity = ?
-            WHERE telegram_id = ?
-        """, (now, user.id))
-
-        await conn.commit()
+        await conn.execute(
+    "UPDATE users SET awaiting_payment = 1 WHERE telegram_id = ?",
+    (user.id,)
+)
+await conn.commit()
 
         try:
             link = await create_one_time_link(user.id, PRODUCT_ID)
@@ -308,8 +306,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- Звичайний /start або deep-link ?start=site ---
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Оплатити курс", callback_data=f"pay:{PRODUCT_ID}")],
-    ])
+    [
+        InlineKeyboardButton(
+            "💳 Оплатити курс",
+            url=PAYMENT_BUTTON_URL
+        )
+    ]
+])
 
     if args and args[0] == "site":
         txt = (
@@ -377,37 +380,6 @@ async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 telegram_app.add_handler(CommandHandler("access", access_cmd))
 
-
-# ===================== PAYMENT (WayForPay BUTTON FLOW) =====================
-
-async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Кнопка "Оплатити курс":
-    - помічаємо користувача як такого, що очікує оплату
-    - відправляємо йому лінк на статичну кнопку WayForPay
-    - після оплати WayForPay веде на /payment/success (Approved URL),
-      де є кнопка повернення в бота з ?start=paid
-    """
-    query = update.callback_query
-    await query.answer()
-
-    user = query.from_user
-    await upsert_user(user.id, user.username, user.first_name)
-
-    conn = await get_db()
-    await conn.execute(
-        "UPDATE users SET awaiting_payment = 1 WHERE telegram_id = ?",
-        (user.id,)
-    )
-    await conn.commit()
-
-    await query.message.edit_reply_markup(
-    reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Оплатити курс", url=PAYMENT_BUTTON_URL)]
-    ])
-)
-
-telegram_app.add_handler(CallbackQueryHandler(pay_cb, pattern=r"^pay:"))
 
 
 # ===================== /stats =====================
