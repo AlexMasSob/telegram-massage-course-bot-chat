@@ -42,6 +42,9 @@ KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "268351523"))
 SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID", "-5032163085"))
 
+BASE_DIR = Path(__file__).resolve().parent
+SUCCESS_HTML_PATH = BASE_DIR / "static" / "success.html"
+
 # Юзернейм бота (для deep-link назад у бота)
 BOT_USERNAME = os.getenv("BOT_USERNAME", "Massagesobi_bot")
 
@@ -922,49 +925,56 @@ async def wfp_callback(request: Request):
 
 
 # ===================== HTML СТОРІНКА УСПІШНОЇ ОПЛАТИ =====================
-
-BASE_DIR = Path(__file__).resolve().parent
-SUCCESS_HTML_PATH = BASE_DIR / "static" / "success.html"
-
-
 @app.get("/payment/success", response_class=HTMLResponse)
 async def payment_success_get():
     """
-    Цю адресу вкажи в WayForPay як Approved URL:
+    Цю адресу вказуємо в WayForPay як Approved URL:
     https://your-render-app.onrender.com/payment/success
     """
     if SUCCESS_HTML_PATH.exists():
         html = SUCCESS_HTML_PATH.read_text(encoding="utf-8")
+
+        # підставляємо динамічні значення
         html = html.replace("__BOT_USERNAME__", BOT_USERNAME)
         html = html.replace("__PRODUCT_NAME__", PRODUCT_NAME)
-        return HTMLResponse(content=html)
-    else:
-        # fallback, якщо файлу раптом немає
-        return HTMLResponse(
-            content=f"""
+
+        return HTMLResponse(content=html, status_code=200)
+
+    # fallback — якщо файл зник
+    return HTMLResponse(
+        content=f"""
 <!DOCTYPE html>
 <html lang="uk">
-<head><meta charset="UTF-8"><title>Оплата успішна</title></head>
+<head>
+  <meta charset="UTF-8">
+  <title>Оплата успішна</title>
+</head>
 <body>
   <h1>Оплата успішна ✅</h1>
   <p>Дякую за оплату курсу <b>{PRODUCT_NAME}</b>.</p>
-  <p><a href="https://t.me/{BOT_USERNAME}?start=paid">Отримати доступ до курсу</a></p>
+  <p>
+    <a href="https://t.me/{BOT_USERNAME}?start=paid">
+      Отримати доступ до курсу
+    </a>
+  </p>
 </body>
 </html>
 """,
-            status_code=200
-        )
-
-
-@app.post("/payment/success")
+        status_code=200
+    )
+    @app.post("/payment/success")
 async def payment_success_post(request: Request):
     """
-    Якщо в WayForPay увімкнена галочка "Відправка POST на approvedUrl/declinedUrl",
-    вони будуть стукати сюди POST-запитом. Нам достатньо ввічливо відповісти.
+    WayForPay POST на approvedUrl.
+    Нічого не обробляємо — просто відповідаємо.
     """
     body = await request.body()
-    print("WayForPay POST to /payment/success:", body.decode("utf-8", errors="ignore"))
+    print(
+        "WayForPay POST /payment/success:",
+        body.decode("utf-8", errors="ignore")
+    )
     return {"status": "ok"}
+
 
 
 # ===================== TELEGRAM WEBHOOK =====================
