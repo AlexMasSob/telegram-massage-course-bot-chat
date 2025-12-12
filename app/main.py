@@ -401,15 +401,11 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await conn.commit()
 
-    txt = "<b>Перейдіть за посиланням нижче та сплатіть курс на захищеній сторінці WayForPay.</b>"
-    
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Перейти до оплати", url=PAYMENT_BUTTON_URL)]
+    await query.message.edit_reply_markup(
+    reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Оплатити курс", url=PAYMENT_BUTTON_URL)]
     ])
-
-    await query.message.reply_text(txt, reply_markup=keyboard, parse_mode="HTML")
-
+)
 
 telegram_app.add_handler(CallbackQueryHandler(pay_cb, pattern=r"^pay:"))
 
