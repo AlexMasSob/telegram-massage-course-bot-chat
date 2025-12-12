@@ -401,8 +401,7 @@ async def pay_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await conn.commit()
 
-    txt = (
-        "<b> Перейдіть за посиланням нижче та сплатіть курс на захищеній сторінці WayForPay.\n\
+    txt = "<b>Перейдіть за посиланням нижче та сплатіть курс на захищеній сторінці WayForPay.</b>"
     )
 
     keyboard = InlineKeyboardMarkup([
