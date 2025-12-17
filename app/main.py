@@ -159,26 +159,11 @@ async def create_one_time_link(user_id):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await upsert_user(user.id, user.username, user.first_name)
-
-    conn = await get_db()
-    cur = await conn.execute(
-        "SELECT has_access FROM users WHERE telegram_id = ?",
-        (user.id,)
-    )
-    row = await cur.fetchone()
-
-    if row and row["has_access"] == 1:
-        await update.message.reply_text(
-            "✅ <b>У вас вже є доступ до курсу.</b>\n\n"
-            "Щоб отримати посилання, введіть:\n/access",
-            parse_mode="HTML"
-        )
-        return
+    await upsert_user(user)
 
     args = context.args or []
     conn = await get_db()
-
+    
     # === RETURN FROM PAYMENT ===
     if args and args[0] == "paid":
         cur = await conn.execute(
