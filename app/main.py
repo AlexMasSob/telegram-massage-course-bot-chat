@@ -159,7 +159,7 @@ async def create_one_time_link(user_id):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await upsert_user(user)
+    await upsert_user(user.id, user.username, user.first_name)
 
     conn = await get_db()
 cur = await conn.execute(
