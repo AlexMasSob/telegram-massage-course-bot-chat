@@ -162,20 +162,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await upsert_user(user.id, user.username, user.first_name)
 
     conn = await get_db()
-cur = await conn.execute(
-    "SELECT has_access FROM users WHERE telegram_id = ?",
-    (user.id,)
-)
-row = await cur.fetchone()
-
-if row and row["has_access"] == 1:
-    await update.message.reply_text(
-        "✅ <b>У вас вже є доступ до курсу.</b>\n\n"
-        "Щоб отримати посилання на приватний канал, натисніть:\n"
-        "/access",
-        parse_mode="HTML"
+    cur = await conn.execute(
+        "SELECT has_access FROM users WHERE telegram_id = ?",
+        (user.id,)
     )
-    return
+    row = await cur.fetchone()
+
+    if row and row["has_access"] == 1:
+        await update.message.reply_text(
+            "✅ <b>У вас вже є доступ до курсу.</b>\n\n"
+            "Щоб отримати посилання, введіть:\n/access",
+            parse_mode="HTML"
+        )
+        return
 
     args = context.args or []
     conn = await get_db()
