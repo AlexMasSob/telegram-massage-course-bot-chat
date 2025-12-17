@@ -264,8 +264,8 @@ async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if row["c"] == 0:
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 Оплатити курс", callback_data=f"pay:{PRODUCT_ID}")]
-        ])
+    [InlineKeyboardButton("💳 Оплатити курс", url=PAYMENT_BUTTON_URL)]
+])
         await update.message.reply_text(
             "<b>У Вас ще немає активного доступу.</b>\n"
             "Щоб отримати його — потрібно сплатити курс нижче 👇",
