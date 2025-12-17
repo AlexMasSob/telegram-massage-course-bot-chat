@@ -255,42 +255,49 @@ async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = await get_db()
 
+    # перевіряємо, чи є успішна оплата
     cur = await conn.execute("""
         SELECT COUNT(*) AS c
         FROM purchases
-        WHERE telegram_id = ? AND status='approved'
+        WHERE telegram_id = ? AND status = 'approved'
     """, (user.id,))
     row = await cur.fetchone()
 
+    # ❌ ще НЕ купував
     if row["c"] == 0:
         keyboard = InlineKeyboardMarkup([
-    [InlineKeyboardButton("💳 Оплатити курс", url=PAYMENT_BUTTON_URL)]
-])
+            [InlineKeyboardButton("💳 Оплатити курс", url=PAYMENT_BUTTON_URL)]
+        ])
+
         await update.message.reply_text(
-            "<b>У Вас ще немає активного доступу.</b>\n"
-            "Щоб отримати його — потрібно сплатити курс нижче 👇",
+            "<b>У Вас ще немає активного доступу.</b>\n\n"
+            "Щоб отримати доступ до курсу — натисніть кнопку нижче та сплатіть курс 👇",
             reply_markup=keyboard,
             parse_mode="HTML"
         )
         return
 
+    # ✅ вже купував → видаємо новий одноразовий доступ
     try:
         link = await create_one_time_link(user.id, PRODUCT_ID)
+
         await update.message.reply_text(
-            "🔑 <b>Ось Ваш новий особистий доступ у канал:</b>\n"
+            "🔑 <b>Ось Ваш особистий доступ у приватний канал з уроками:</b>\n\n"
             f"{link}\n\n"
-            "Якщо не зможете зайти — просто повторіть /access 🙂",
+            "Якщо не зможете зайти — просто повторіть команду /access 🙂",
             parse_mode="HTML"
         )
+
     except Exception as e:
         await update.message.reply_text(
-            f"Помилка під час створення доступу:\n<code>{e}</code>",
+            "Сталася помилка при створенні доступу 😔\n"
+            "Будь ласка, напишіть у підтримку — я все вирішу вручну.\n\n"
+            f"<code>{e}</code>",
             parse_mode="HTML"
         )
 
 
 telegram_app.add_handler(CommandHandler("access", access_cmd))
-
 
 # ===================== /stats =====================
 
