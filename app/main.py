@@ -166,35 +166,75 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # === RETURN FROM PAYMENT ===
     if args and args[0] == "paid":
-        cur = await conn.execute(
-            "SELECT awaiting_payment FROM users WHERE telegram_id = ?",
-            (user.id,)
-        )
-        row = await cur.fetchone()
+    conn = await get_db()
 
-        if not row or row["awaiting_payment"] == 0:
-            await update.message.reply_text(
-                "Я не бачу активної оплати. Якщо ви оплатили — напишіть у підтримку 🙏"
-            )
-            return
+    cur = await conn.execute(
+        "SELECT awaiting_payment FROM users WHERE telegram_id = ?",
+        (user.id,)
+    )
+    row = await cur.fetchone()
 
-        now = int(time.time())
-        await conn.execute("""
-            INSERT INTO purchases
-            (telegram_id, product_id, amount, currency, status, order_ref, created_at, paid_at)
-            VALUES (?, ?, ?, ?, 'approved', ?, ?, ?)
-        """, (user.id, PRODUCT_ID, AMOUNT, CURRENCY, f"order_{user.id}_{now}", now, now))
-
-        await conn.execute("""
-            UPDATE users SET awaiting_payment = 0, has_access = 1 WHERE telegram_id = ?
-        """, (user.id,))
-        await conn.commit()
-
-        link = await create_one_time_link(user.id)
+    if not row or row["awaiting_payment"] == 0:
         await update.message.reply_text(
-            f"🎉 Оплата успішна!\n\nОсь ваш доступ:\n{link}"
+            "Я не бачу активної оплати для Вашого акаунту.\n\n"
+            "Якщо Ви оплатили, але не отримали доступ — напишіть у підтримку 🙏",
+            parse_mode="HTML"
         )
         return
+
+    # 🔒 захист від дублювання
+    cur = await conn.execute("""
+        SELECT id FROM purchases
+        WHERE telegram_id = ? AND product_id = ? AND status = 'approved'
+    """, (user.id, PRODUCT_ID))
+    already_paid = await cur.fetchone()
+
+    if already_paid:
+        await update.message.reply_text(
+            "✅ У Вас вже є активний доступ.\n\n"
+            "Для повторного отримання посилання використовуйте /access",
+            parse_mode="HTML"
+        )
+        return
+
+    now = int(time.time())
+    order_ref = f"button_{user.id}_{now}"
+
+    await conn.execute("""
+        INSERT INTO purchases (
+            telegram_id, product_id, amount, currency,
+            status, order_ref, created_at, paid_at
+        )
+        VALUES (?, ?, ?, ?, 'approved', ?, ?, ?)
+    """, (
+        user.id,
+        PRODUCT_ID,
+        AMOUNT,
+        CURRENCY,
+        order_ref,
+        now,
+        now
+    ))
+
+    await conn.execute("""
+        UPDATE users
+        SET awaiting_payment = 0,
+            has_access = 1,
+            last_activity = ?
+        WHERE telegram_id = ?
+    """, (now, user.id))
+
+    await conn.commit()
+
+    link = await create_one_time_link(user.id, PRODUCT_ID)
+
+    await update.message.reply_text(
+        "🎉 <b>Оплата успішна!</b>\n\n"
+        "Ось Ваш особистий доступ у канал:\n"
+        f"{link}",
+        parse_mode="HTML"
+    )
+    return
 
     # === NORMAL START ===
     await conn.execute(
