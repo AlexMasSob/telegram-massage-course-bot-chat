@@ -231,18 +231,90 @@ telegram_app.add_handler(CommandHandler("start", start))
 
 # ===================== PAYMENT SUCCESS PAGE =====================
 
+# ===================== PAYMENT SUCCESS PAGE =====================
+
 @app.get("/payment/success", response_class=HTMLResponse)
 async def payment_success():
     return f"""
-<html>
-<body style="text-align:center;font-family:sans-serif">
-<h2>Оплата успішна ✅</h2>
-<p>Натисніть кнопку нижче, щоб отримати доступ</p>
-<a href="https://t.me/{BOT_USERNAME}?start=paid"
-style="padding:14px 26px;background:#0088cc;color:white;
-text-decoration:none;border-radius:30px;">
-Отримати доступ
-</a>
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Оплата успішна</title>
+
+    <style>
+        body {{
+            margin: 0;
+            padding: 0;
+            background: #f4f6f8;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                         Roboto, Helvetica, Arial, sans-serif;
+        }}
+
+        .card {{
+            max-width: 420px;
+            margin: 80px auto;
+            background: #ffffff;
+            padding: 32px 24px;
+            border-radius: 18px;
+            box-shadow: 0 12px 30px rgba(0,0,0,0.08);
+            text-align: center;
+        }}
+
+        h1 {{
+            font-size: 26px;
+            margin: 0 0 12px 0;
+        }}
+
+        p {{
+            font-size: 17px;
+            line-height: 1.5;
+            color: #333;
+        }}
+
+        a.button {{
+            display: inline-block;
+            margin-top: 24px;
+            padding: 18px 34px;
+            background: #0088cc;
+            color: #ffffff;
+            text-decoration: none;
+            border-radius: 999px;
+            font-size: 18px;
+            font-weight: 600;
+        }}
+
+        a.button:active {{
+            transform: scale(0.97);
+        }}
+
+        .hint {{
+            margin-top: 20px;
+            font-size: 14px;
+            color: #666;
+        }}
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <h1>Оплата успішна ✅</h1>
+
+        <p>
+            Дякуємо за оплату!<br>
+            Натисніть кнопку нижче, щоб отримати доступ до курсу.
+        </p>
+
+        <a class="button" href="https://t.me/{BOT_USERNAME}?start=paid">
+            Отримати доступ
+        </a>
+
+        <div class="hint">
+            Якщо кнопка не відкрилась — відкрийте Telegram<br>
+            та напишіть боту <b>@{BOT_USERNAME}</b>
+        </div>
+    </div>
 </body>
 </html>
 """
