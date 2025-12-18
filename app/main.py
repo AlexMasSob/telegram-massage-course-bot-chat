@@ -22,33 +22,29 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_TOKEN = os.getenv("WEBHOOK_TOKEN")
 
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID"))
 
-PAYMENT_BUTTON_URL = os.getenv(
-    "PAYMENT_BUTTON_URL",
-    "https://secure.wayforpay.com/button/ba6a191c6ba56"
-)
+PAYMENT_BUTTON_URL = os.getenv("PAYMENT_BUTTON_URL")
+KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL")
 
 PRODUCT_ID = int(os.getenv("PRODUCT_ID", "1"))
 PRODUCT_NAME = os.getenv("PRODUCT_NAME", "Курс самомасажу")
-AMOUNT = float(os.getenv("AMOUNT", "290.00"))
+AMOUNT = float(os.getenv("AMOUNT", "290"))
 CURRENCY = os.getenv("CURRENCY", "UAH")
 
-KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL")
+BOT_USERNAME = os.getenv("BOT_USERNAME")
 
-ADMIN_ID = int(os.getenv("ADMIN_ID", "268351523"))
-SUPPORT_CHAT_ID = int(os.getenv("SUPPORT_CHAT_ID", "-5032163085"))
-
-BOT_USERNAME = os.getenv("BOT_USERNAME", "Massagesobi_bot")
-
-if not BOT_TOKEN or not CHANNEL_ID or not KEEP_ALIVE_URL:
+if not BOT_TOKEN or not CHANNEL_ID or not PAYMENT_BUTTON_URL or not KEEP_ALIVE_URL:
     raise RuntimeError("Missing ENV variables")
 
+# ===================== APP =====================
+
 app = FastAPI()
+telegram_app = Application.builder().token(BOT_TOKEN).build()
 
 DB_PATH = "database.db"
 db = None
-
-telegram_app = Application.builder().token(BOT_TOKEN).build()
 
 # ===================== DB =====================
 
@@ -83,7 +79,6 @@ async def init_db():
             amount REAL,
             currency TEXT,
             status TEXT,
-            order_ref TEXT UNIQUE,
             created_at INTEGER,
             paid_at INTEGER
         )
@@ -93,9 +88,9 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS access_links (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id INTEGER,
-            product_id INTEGER,
             invite_link TEXT,
-            created_at INTEGER
+            created_at INTEGER,
+            used INTEGER DEFAULT 0
         )
     """)
 
@@ -113,11 +108,31 @@ async def upsert_user(user):
     """, (user.id, user.username, user.first_name, now, now))
 
     await conn.execute("""
-        UPDATE users SET last_activity = ? WHERE telegram_id = ?
+        UPDATE users SET last_activity = ?
+        WHERE telegram_id = ?
     """, (now, user.id))
 
     await conn.commit()
 
+
+async def create_invite_link(user_id: int) -> str:
+    invite = await telegram_app.bot.create_chat_invite_link(
+        chat_id=CHANNEL_ID,
+        member_limit=1
+    )
+
+    conn = await get_db()
+    await conn.execute("""
+        INSERT INTO access_links (telegram_id, invite_link, created_at)
+        VALUES (?, ?, ?)
+    """, (user_id, invite.invite_link, int(time.time())))
+
+    await conn.commit()
+    return invite.invite_link
+
+
+def is_admin(update: Update) -> bool:
+    return update.effective_user.id == ADMIN_ID
 
 # ===================== KEEP ALIVE =====================
 
@@ -126,10 +141,11 @@ async def keep_alive():
         try:
             async with aiohttp.ClientSession() as s:
                 await s.get(KEEP_ALIVE_URL)
-        except:
+        except Exception:
             pass
         await asyncio.sleep(300)
 
+# ===================== STARTUP =====================
 
 @app.on_event("startup")
 async def startup():
@@ -137,23 +153,6 @@ async def startup():
     await telegram_app.start()
     await init_db()
     asyncio.create_task(keep_alive())
-
-
-# ===================== HELPERS =====================
-
-async def create_one_time_link(user_id):
-    invite = await telegram_app.bot.create_chat_invite_link(
-        chat_id=CHANNEL_ID,
-        member_limit=1
-    )
-    conn = await get_db()
-    await conn.execute("""
-        INSERT INTO access_links (telegram_id, product_id, invite_link, created_at)
-        VALUES (?, ?, ?, ?)
-    """, (user_id, PRODUCT_ID, invite.invite_link, int(time.time())))
-    await conn.commit()
-    return invite.invite_link
-
 
 # ===================== /start =====================
 
@@ -245,6 +244,77 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 telegram_app.add_handler(CommandHandler("start", start))
 
+# ===================== /access =====================
+
+async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await upsert_user(user)
+
+    conn = await get_db()
+    cur = await conn.execute(
+        "SELECT has_access FROM users WHERE telegram_id = ?",
+        (user.id,)
+    )
+    row = await cur.fetchone()
+
+    if not row or row["has_access"] == 0:
+        await update.message.reply_text(
+            "❌ У Вас немає активного доступу.",
+            parse_mode="HTML"
+        )
+        return
+
+    link = await create_invite_link(user.id)
+
+    await update.message.reply_text(
+        "🔑 Ваш доступ:\n" + link,
+        parse_mode="HTML"
+    )
+
+telegram_app.add_handler(CommandHandler("access", access_cmd))
+
+# ===================== /stats =====================
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+
+    conn = await get_db()
+
+    cur = await conn.execute("SELECT COUNT(*) c FROM users")
+    users = (await cur.fetchone())["c"]
+
+    cur = await conn.execute("SELECT COUNT(*) c FROM purchases")
+    paid = (await cur.fetchone())["c"]
+
+    cur = await conn.execute("SELECT COALESCE(SUM(amount),0) s FROM purchases")
+    revenue = (await cur.fetchone())["s"]
+
+    await update.message.reply_text(
+        f"<b>Статистика</b>\n\n"
+        f"👥 Користувачі: <b>{users}</b>\n"
+        f"💳 Покупці: <b>{paid}</b>\n"
+        f"💰 Дохід: <b>{revenue} UAH</b>",
+        parse_mode="HTML"
+    )
+
+telegram_app.add_handler(CommandHandler("stats", stats_cmd))
+
+# ===================== SUPPORT =====================
+
+async def user_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id == ADMIN_ID:
+        return
+
+    if not update.message or update.message.text.startswith("/"):
+        return
+
+    await telegram_app.bot.send_message(
+        SUPPORT_CHAT_ID,
+        f"💬 Повідомлення від {update.effective_user.id}:\n\n{update.message.text}"
+    )
+
+telegram_app.add_handler(MessageHandler(filters.TEXT, user_messages))
 
 # ===================== PAYMENT SUCCESS PAGE =====================
 
@@ -333,62 +403,6 @@ async def payment_success():
 </body>
 </html>
 """
-
-# ===================== /access =====================
-
-async def access_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    await upsert_user(user)
-
-    conn = await get_db()
-    cur = await conn.execute(
-        "SELECT has_access FROM users WHERE telegram_id = ?",
-        (user.id,)
-    )
-    row = await cur.fetchone()
-
-    if not row or row["has_access"] == 0:
-        await update.message.reply_text(
-            "❌ У Вас немає активного доступу.",
-            parse_mode="HTML"
-        )
-        return
-
-    link = await create_invite_link(user.id)
-
-    await update.message.reply_text(
-        "🔑 Ваш доступ:\n" + link,
-        parse_mode="HTML"
-    )
-
-telegram_app.add_handler(CommandHandler("access", access_cmd))
-
-# ===================== /stats =====================
-
-async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update):
-        return
-
-    conn = await get_db()
-
-    cur = await conn.execute("SELECT COUNT(*) c FROM users")
-    users = (await cur.fetchone())["c"]
-
-    cur = await conn.execute("SELECT COUNT(*) c FROM purchases")
-    paid = (await cur.fetchone())["c"]
-
-    cur = await conn.execute("SELECT COALESCE(SUM(amount),0) s FROM purchases")
-    revenue = (await cur.fetchone())["s"]
-
-    await update.message.reply_text(
-        f"<b>Статистика</b>\n\n"
-        f"👥 Користувачі: <b>{users}</b>\n"
-        f"💳 Покупці: <b>{paid}</b>\n"
-        f"💰 Дохід: <b>{revenue} UAH</b>",
-        parse_mode="HTML"
-    )
-
-telegram_app.add_handler(CommandHandler("stats", stats_cmd))
 
 # ===================== TEXT BROADCASTS =====================
 
