@@ -161,38 +161,55 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await upsert_user(user)
 
-    args = context.args or []
     conn = await get_db()
+    args = context.args or []
 
     # === RETURN FROM PAYMENT ===
     if args and args[0] == "paid":
         cur = await conn.execute(
-            "SELECT awaiting_payment FROM users WHERE telegram_id = ?",
+            "SELECT awaiting_payment, has_access FROM users WHERE telegram_id = ?",
             (user.id,)
         )
         row = await cur.fetchone()
 
         if not row or row["awaiting_payment"] == 0:
             await update.message.reply_text(
-                "Я не бачу активної оплати. Якщо ви оплатили — напишіть у підтримку 🙏"
+                "Я не бачу активної оплати для Вашого акаунту.\n"
+                "Якщо Ви оплатили — напишіть у підтримку 🙏",
+                parse_mode="HTML"
+            )
+            return
+
+        if row["has_access"] == 1:
+            await update.message.reply_text(
+                "✅ У Вас вже є доступ.\nСкористайтесь /access",
+                parse_mode="HTML"
             )
             return
 
         now = int(time.time())
+
         await conn.execute("""
             INSERT INTO purchases
-            (telegram_id, product_id, amount, currency, status, order_ref, created_at, paid_at)
-            VALUES (?, ?, ?, ?, 'approved', ?, ?, ?)
-        """, (user.id, PRODUCT_ID, AMOUNT, CURRENCY, f"order_{user.id}_{now}", now, now))
+            (telegram_id, product_id, amount, currency, status, created_at, paid_at)
+            VALUES (?, ?, ?, ?, 'approved', ?, ?)
+        """, (user.id, PRODUCT_ID, AMOUNT, CURRENCY, now, now))
 
         await conn.execute("""
-            UPDATE users SET awaiting_payment = 0, has_access = 1 WHERE telegram_id = ?
+            UPDATE users
+            SET has_access = 1, awaiting_payment = 0
+            WHERE telegram_id = ?
         """, (user.id,))
+
         await conn.commit()
 
-        link = await create_one_time_link(user.id)
+        link = await create_invite_link(user.id)
+
         await update.message.reply_text(
-            f"🎉 Оплата успішна!\n\nОсь ваш доступ:\n{link}"
+            "🎉 <b>Оплата успішна!</b>\n\n"
+            "Ось Ваш доступ:\n"
+            f"{link}",
+            parse_mode="HTML"
         )
         return
 
