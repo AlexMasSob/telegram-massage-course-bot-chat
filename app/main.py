@@ -280,41 +280,58 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     conn = await get_db()
+    now = int(time.time())
 
+    def period(days: int):
+        return now - days * 86400
+
+    # Загальні показники
     cur = await conn.execute("SELECT COUNT(*) c FROM users")
-    users = (await cur.fetchone())["c"]
+    total_users = (await cur.fetchone())["c"]
 
-    cur = await conn.execute("SELECT COUNT(*) c FROM purchases")
-    paid = (await cur.fetchone())["c"]
-
-    cur = await conn.execute("SELECT COALESCE(SUM(amount),0) s FROM purchases")
-    revenue = (await cur.fetchone())["s"]
-
-    await update.message.reply_text(
-        f"<b>Статистика</b>\n\n"
-        f"👥 Користувачі: <b>{users}</b>\n"
-        f"💳 Покупці: <b>{paid}</b>\n"
-        f"💰 Дохід: <b>{revenue} UAH</b>",
-        parse_mode="HTML"
+    cur = await conn.execute(
+        "SELECT COUNT(*) c FROM purchases WHERE status = 'approved'"
     )
+    total_paid = (await cur.fetchone())["c"]
+
+    cur = await conn.execute(
+        "SELECT COALESCE(SUM(amount),0) s FROM purchases WHERE status = 'approved'"
+    )
+    total_revenue = (await cur.fetchone())["s"]
+
+    async def count_period(since_ts: int):
+        cur = await conn.execute("""
+            SELECT
+                COUNT(*) c,
+                COALESCE(SUM(amount),0) s
+            FROM purchases
+            WHERE status = 'approved'
+              AND paid_at >= ?
+        """, (since_ts,))
+        row = await cur.fetchone()
+        return row["c"], row["s"]
+
+    day_c, day_rev     = await count_period(period(1))
+    week_c, week_rev   = await count_period(period(7))
+    month_c, month_rev = await count_period(period(30))
+    q_c, q_rev         = await count_period(period(90))
+
+    txt = (
+        "<b>📊 Статистика бота</b>\n\n"
+        f"👥 Усього користувачів: <b>{total_users}</b>\n"
+        f"💳 Усього покупців: <b>{total_paid}</b>\n"
+        f"💰 Загальний дохід: <b>{round(total_revenue, 2)} UAH</b>\n\n"
+        "<b>Продажі по періодах:</b>\n"
+        f"📅 За 24 години: <b>{day_c}</b> – <b>{round(day_rev, 2)} UAH</b>\n"
+        f"📆 За 7 днів: <b>{week_c}</b> – <b>{round(week_rev, 2)} UAH</b>\n"
+        f"🗓 За 30 днів: <b>{month_c}</b> – <b>{round(month_rev, 2)} UAH</b>\n"
+        f"📈 За 90 днів: <b>{q_c}</b> – <b>{round(q_rev, 2)} UAH</b>\n"
+    )
+
+    await update.message.reply_text(txt, parse_mode="HTML")
+
 
 telegram_app.add_handler(CommandHandler("stats", stats_cmd))
-
-# ===================== SUPPORT =====================
-
-async def user_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id == ADMIN_ID:
-        return
-
-    if not update.message or update.message.text.startswith("/"):
-        return
-
-    await telegram_app.bot.send_message(
-        SUPPORT_CHAT_ID,
-        f"💬 Повідомлення від {update.effective_user.id}:\n\n{update.message.text}"
-    )
-
-telegram_app.add_handler(MessageHandler(filters.TEXT, user_messages))
 
 # ===================== PAYMENT SUCCESS PAGE =====================
 
