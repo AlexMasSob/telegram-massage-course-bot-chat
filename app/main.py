@@ -282,57 +282,56 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = await get_db()
     now = int(time.time())
 
-    def since(days: int) -> int:
-        return now - days * 86400
+    def period(ts_days):
+        return now - ts_days * 86400
 
-    # --- загальні ---
     cur = await conn.execute("SELECT COUNT(*) AS c FROM users")
     total_users = (await cur.fetchone())["c"]
 
-    cur = await conn.execute(
-        "SELECT COUNT(*) AS c FROM purchases WHERE status = 'approved'"
-    )
+    cur = await conn.execute("SELECT COUNT(*) AS c FROM purchases WHERE status='approved'")
     total_paid = (await cur.fetchone())["c"]
 
-    cur = await conn.execute(
-        "SELECT COALESCE(SUM(amount), 0) AS s FROM purchases WHERE status = 'approved'"
-    )
+    cur = await conn.execute("SELECT COALESCE(SUM(amount),0) AS s FROM purchases WHERE status='approved'")
     total_revenue = (await cur.fetchone())["s"]
 
-    # --- по періодах ---
-    async def period_stats(days: int):
+    async def count_period(sec):
         cur = await conn.execute("""
-            SELECT 
-                COUNT(*) AS c,
-                COALESCE(SUM(amount), 0) AS s
+            SELECT COUNT(*) AS c,
+                   COALESCE(SUM(amount),0) AS revenue
             FROM purchases
-            WHERE status = 'approved'
+            WHERE status='approved'
               AND paid_at >= ?
-        """, (since(days),))
+        """, (sec,))
         row = await cur.fetchone()
-        return row["c"], row["s"]
+        return row["c"], row["revenue"]
 
-    day_c, day_s     = await period_stats(1)
-    week_c, week_s   = await period_stats(7)
-    month_c, month_s = await period_stats(30)
-    q_c, q_s         = await period_stats(90)
+    day_c, day_rev     = await count_period(period(1))
+    week_c, week_rev   = await count_period(period(7))
+    month_c, month_rev = await count_period(period(30))
+    q_c, q_rev         = await count_period(period(90))
 
     txt = (
         "<b>Статистика бота</b>\n\n"
-        f"👥 Усього користувачів: <b>{total_users}</b>\n"
-        f"💳 Усього покупців: <b>{total_paid}</b>\n"
-        f"💰 Загальний дохід: <b>{round(total_revenue, 2)} UAH</b>\n\n"
+        "👥 Усього користувачів: <b>{}</b>\n"
+        "💳 Усього покупців: <b>{}</b>\n"
+        "💰 Загальний дохід: <b>{} UAH</b>\n\n"
         "<b>Продажі по періодах:</b>\n"
-        f"📅 За 24 години: <b>{day_c}</b> – <b>{round(day_s, 2)} UAH</b>\n"
-        f"📆 За 7 днів: <b>{week_c}</b> – <b>{round(week_s, 2)} UAH</b>\n"
-        f"🗓 За 30 днів: <b>{month_c}</b> – <b>{round(month_s, 2)} UAH</b>\n"
-        f"📈 За 90 днів: <b>{q_c}</b> – <b>{round(q_s, 2)} UAH</b>\n"
+        "📅 За 24 години: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "📆 За 7 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "🗓 За 30 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "📈 За 90 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+    ).format(
+        total_users, total_paid, round(total_revenue, 2),
+        day_c, round(day_rev, 2),
+        week_c, round(week_rev, 2),
+        month_c, round(month_rev, 2),
+        q_c, round(q_rev, 2)
     )
 
     await update.message.reply_text(txt, parse_mode="HTML")
 
-
 telegram_app.add_handler(CommandHandler("stats", stats_cmd))
+
 
 # ===================== SUPPORT =====================
 
