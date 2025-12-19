@@ -282,32 +282,38 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = await get_db()
     now = int(time.time())
 
-    def period(days: int):
+    def period(days: int) -> int:
         return now - days * 86400
 
-    # Загальні показники
-    cur = await conn.execute("SELECT COUNT(*) c FROM users")
+    # --- базові метрики ---
+    cur = await conn.execute("SELECT COUNT(*) AS c FROM users")
     total_users = (await cur.fetchone())["c"]
 
-    cur = await conn.execute(
-        "SELECT COUNT(*) c FROM purchases WHERE status = 'approved'"
-    )
+    cur = await conn.execute("""
+        SELECT COUNT(*) AS c
+        FROM purchases
+        WHERE status = 'approved'
+    """)
     total_paid = (await cur.fetchone())["c"]
 
-    cur = await conn.execute(
-        "SELECT COALESCE(SUM(amount),0) s FROM purchases WHERE status = 'approved'"
-    )
+    cur = await conn.execute("""
+        SELECT COALESCE(SUM(amount), 0) AS s
+        FROM purchases
+        WHERE status = 'approved'
+    """)
     total_revenue = (await cur.fetchone())["s"]
 
-    async def count_period(since_ts: int):
+    # --- продажі по періодах ---
+    async def count_period(from_ts: int):
         cur = await conn.execute("""
             SELECT
-                COUNT(*) c,
-                COALESCE(SUM(amount),0) s
+                COUNT(*) AS c,
+                COALESCE(SUM(amount), 0) AS s
             FROM purchases
             WHERE status = 'approved'
+              AND paid_at IS NOT NULL
               AND paid_at >= ?
-        """, (since_ts,))
+        """, (from_ts,))
         row = await cur.fetchone()
         return row["c"], row["s"]
 
@@ -317,15 +323,23 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q_c, q_rev         = await count_period(period(90))
 
     txt = (
-        "<b>📊 Статистика бота</b>\n\n"
-        f"👥 Усього користувачів: <b>{total_users}</b>\n"
-        f"💳 Усього покупців: <b>{total_paid}</b>\n"
-        f"💰 Загальний дохід: <b>{round(total_revenue, 2)} UAH</b>\n\n"
+        "<b>Статистика бота</b>\n\n"
+        "👥 Усього користувачів: <b>{}</b>\n"
+        "💳 Усього покупців: <b>{}</b>\n"
+        "💰 Загальний дохід: <b>{} UAH</b>\n\n"
         "<b>Продажі по періодах:</b>\n"
-        f"📅 За 24 години: <b>{day_c}</b> – <b>{round(day_rev, 2)} UAH</b>\n"
-        f"📆 За 7 днів: <b>{week_c}</b> – <b>{round(week_rev, 2)} UAH</b>\n"
-        f"🗓 За 30 днів: <b>{month_c}</b> – <b>{round(month_rev, 2)} UAH</b>\n"
-        f"📈 За 90 днів: <b>{q_c}</b> – <b>{round(q_rev, 2)} UAH</b>\n"
+        "📅 За 24 години: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "📆 За 7 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "🗓 За 30 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+        "📈 За 90 днів: <b>{}</b> купівель – <b>{} UAH</b>\n"
+    ).format(
+        total_users,
+        total_paid,
+        round(total_revenue, 2),
+        day_c, round(day_rev, 2),
+        week_c, round(week_rev, 2),
+        month_c, round(month_rev, 2),
+        q_c, round(q_rev, 2)
     )
 
     await update.message.reply_text(txt, parse_mode="HTML")
