@@ -11,6 +11,7 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,  
     ContextTypes,
     MessageHandler,
     filters,
