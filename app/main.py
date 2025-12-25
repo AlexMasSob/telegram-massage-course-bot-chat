@@ -11,7 +11,6 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
-    CallbackQueryHandler,  
     ContextTypes,
     MessageHandler,
     filters,
@@ -175,7 +174,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not row or row["awaiting_payment"] == 0:
             await update.message.reply_text(
                 "Я не бачу активної оплати для Вашого акаунту.\n"
-                "Скористайтесь кнопкою підтримки нижче 🙏",
+                "Якщо Ви оплатили — напишіть у підтримку 🙏",
                 parse_mode="HTML"
             )
             return
@@ -206,7 +205,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link = await create_invite_link(user.id)
 
         await update.message.reply_text(
-            "🎉 <b>Оплата успішна!</b>\n\nОсь Ваш доступ:\n" + link,
+            "🎉 <b>Оплата успішна!</b>\n\n"
+            "Ось Ваш доступ:\n"
+            f"{link}",
             parse_mode="HTML"
         )
         return
@@ -219,8 +220,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await conn.commit()
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Оплатити курс", url=PAYMENT_BUTTON_URL)],
-        [InlineKeyboardButton("🆘 Написати в підтримку", callback_data="support_menu")]
+        [InlineKeyboardButton("💳 Оплатити курс", url=PAYMENT_BUTTON_URL)]
     ])
 
     if args and args[0] == "site":
@@ -239,108 +239,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<b>Після оплати Ви автоматично отримаєте особистий доступ у приватний канал❤️</b>"
         )
 
+    await update.message.reply_text(txt, reply_markup=keyboard, parse_mode="HTML")
+
 telegram_app.add_handler(CommandHandler("start", start))
-
-# ===================== SUPPORT MENU =====================
-
-async def support_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("❌ Не прийшло посилання", callback_data="support_no_link")],
-        [InlineKeyboardButton("🔁 Загубив посилання", callback_data="support_lost_link")],
-        [InlineKeyboardButton("✍️ Інше питання", callback_data="support_other")]
-    ])
-
-    await query.message.reply_text(
-        "❓ <b>Оберіть проблему:</b>",
-        reply_markup=keyboard,
-        parse_mode="HTML"
-    )
-
-telegram_app.add_handler(CallbackQueryHandler(support_menu_cb, pattern="^support_menu$"))
-
-# ===================== SUPPORT: NO LINK =====================
-
-async def support_no_link_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user = query.from_user
-    conn = await get_db()
-
-    cur = await conn.execute(
-        "SELECT awaiting_payment, has_access FROM users WHERE telegram_id = ?",
-        (user.id,)
-    )
-    row = await cur.fetchone()
-
-    if not row or row["awaiting_payment"] == 0:
-        await query.message.reply_text(
-            "❌ Я не бачу активної оплати.\nНапишіть, будь ласка, деталі.",
-            parse_mode="HTML"
-        )
-        return
-
-    if row["has_access"] == 1:
-        link = await create_invite_link(user.id)
-        await query.message.reply_text("🔑 Ось Ваш доступ:\n" + link)
-        return
-
-    now = int(time.time())
-
-    await conn.execute("""
-        INSERT INTO purchases
-        (telegram_id, product_id, amount, currency, status, created_at, paid_at)
-        VALUES (?, ?, ?, ?, 'approved', ?, ?)
-    """, (user.id, PRODUCT_ID, AMOUNT, CURRENCY, now, now))
-
-    await conn.execute("""
-        UPDATE users SET has_access = 1, awaiting_payment = 0
-        WHERE telegram_id = ?
-    """, (user.id,))
-
-    await conn.commit()
-
-    link = await create_invite_link(user.id)
-    await query.message.reply_text("🎉 Оплату підтверджено!\n" + link)
-
-telegram_app.add_handler(CallbackQueryHandler(support_no_link_cb, pattern="^support_no_link$"))
-
-# ===================== SUPPORT: LOST LINK =====================
-
-async def support_lost_link_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user = query.from_user
-    conn = await get_db()
-
-    cur = await conn.execute(
-        "SELECT has_access FROM users WHERE telegram_id = ?",
-        (user.id,)
-    )
-    row = await cur.fetchone()
-
-    if not row or row["has_access"] == 0:
-        await query.message.reply_text("❌ У Вас ще немає доступу.")
-        return
-
-    link = await create_invite_link(user.id)
-    await query.message.reply_text("🔁 Нове посилання:\n" + link)
-
-telegram_app.add_handler(CallbackQueryHandler(support_lost_link_cb, pattern="^support_lost_link$"))
-
-# ===================== SUPPORT: OTHER =====================
-
-async def support_other_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text("✍️ Напишіть Ваше питання повідомленням.")
-
-telegram_app.add_handler(CallbackQueryHandler(support_other_cb, pattern="^support_other$"))
-
 
 # ===================== /access =====================
 
