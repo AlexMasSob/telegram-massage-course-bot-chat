@@ -247,10 +247,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # якщо користувач був у режимі "інше питання" — вимикаємо при /start
     await set_support_mode(user.id, 0)
 
-    # === RETURN FROM PAYMENT ===
-    if args and args[0].startswith("gift_"):
-        gift_code = args[0].replace("gift_", "")
-        conn = await get_db()
+   # === RETURN FROM GIFT LINK ===
+if args and args[0].startswith("gift_"):
+    gift_code = args[0].replace("gift_", "")
+    conn = await get_db()
 
     cur = await conn.execute("""
         SELECT id, is_used FROM gifts WHERE gift_code = ?
@@ -265,6 +265,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Цей подарунок вже був використаний.")
         return
 
+    # видаємо доступ
     link = await create_invite_link(user.id)
     now = int(time.time())
 
@@ -274,14 +275,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """, (now, gift["id"]))
 
     await conn.execute("""
-        UPDATE users SET has_access = 1 WHERE telegram_id = ?
-    """, (user.id,))
+        UPDATE users SET has_access = 1, last_activity = ?
+        WHERE telegram_id = ?
+    """, (now, user.id))
 
     await conn.commit()
 
     await update.message.reply_text(
-        "🎉 <b>Подарунок активовано!</b>\n\n"
-        "Ось ваш доступ до курсу:\n"
+        "🎁 <b>Вам зробили подарунок!</b>\n\n"
+        "Ви отримали доступ до курсу\n"
+        "<b>«Сам Собі Масажист»</b> 💙\n\n"
+        "🔑 Ось ваш персональний доступ:\n"
         f"{link}",
         parse_mode="HTML"
     )
