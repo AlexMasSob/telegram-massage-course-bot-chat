@@ -3,6 +3,7 @@ import time
 import asyncio
 import aiohttp
 import aiosqlite
+import secrets
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
@@ -121,6 +122,17 @@ async def init_db():
         )
     """)
 
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS gifts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            buyer_telegram_id INTEGER,
+            gift_code TEXT UNIQUE,
+            is_used INTEGER DEFAULT 0,
+            created_at INTEGER,
+            used_at INTEGER
+        )
+    """)
+
     await conn.commit()
 
 
@@ -169,6 +181,19 @@ async def create_invite_link(user_id: int) -> str:
 
     await conn.commit()
     return invite.invite_link
+
+async def create_gift(buyer_id: int) -> str:
+    conn = await get_db()
+    code = secrets.token_urlsafe(16)
+    now = int(time.time())
+
+    await conn.execute("""
+        INSERT INTO gifts (buyer_telegram_id, gift_code, created_at)
+        VALUES (?, ?, ?)
+    """, (buyer_id, code, now))
+
+    await conn.commit()
+    return code
 
 
 def is_admin(update: Update) -> bool:
@@ -223,6 +248,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await set_support_mode(user.id, 0)
 
     # === RETURN FROM PAYMENT ===
+    if args and args[0].startswith("gift_"):
+    gift_code = args[0].replace("gift_", "")
+    conn = await get_db()
+
+    cur = await conn.execute("""
+        SELECT id, is_used FROM gifts WHERE gift_code = ?
+    """, (gift_code,))
+    gift = await cur.fetchone()
+
+    if not gift:
+        await update.message.reply_text("❌ Цей подарунок недійсний.")
+        return
+
+    if gift["is_used"] == 1:
+        await update.message.reply_text("⚠️ Цей подарунок вже був використаний.")
+        return
+
+    link = await create_invite_link(user.id)
+    now = int(time.time())
+
+    await conn.execute("""
+        UPDATE gifts SET is_used = 1, used_at = ?
+        WHERE id = ?
+    """, (now, gift["id"]))
+
+    await conn.execute("""
+        UPDATE users SET has_access = 1 WHERE telegram_id = ?
+    """, (user.id,))
+
+    await conn.commit()
+
+    await update.message.reply_text(
+        "🎉 <b>Подарунок активовано!</b>\n\n"
+        "Ось ваш доступ до курсу:\n"
+        f"{link}",
+        parse_mode="HTML"
+    )
+    return
+    
     if args and args[0] == "paid":
         row = await get_user_row(user.id)
 
@@ -276,23 +340,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await conn.commit()
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Оплатити курс", url=PAYMENT_BUTTON_URL)],
-        [InlineKeyboardButton("🆘 Написати в підтримку", callback_data="support:menu")]
+        [InlineKeyboardButton("💳 Оплатити курс для себе", url=PAYMENT_BUTTON_URL)],
+        [InlineKeyboardButton("🎁 Купити курс в подарунок", callback_data="buy_gift")],
+        [InlineKeyboardButton("✉️ Написати в підтримку", callback_data="support:menu")]
     ])
 
     if args and args[0] == "site":
         txt = (
             "Вітаю! 👋\n\n"
             "Ви перейшли з сайту <b>Сам Собі Масажист</b>.\n\n"
-            "Натисніть кнопку нижче, щоб оплатити курс і отримати доступ "
-            "у приватний канал з відеоуроками ❤️"
+            "Тут ви можете:\n"
+            "• придбати курс для себе\n"
+            "• або зробити корисний подарунок близькій людині 🎁\n\n"
+            "Оберіть потрібний варіант нижче, щоб оплатити курс і отримати доступ "
+            "у приватний канал з відеоуроками ❤️👇"
         )
     else:
         txt = (
             "Вітаю! 👋\n\n"
             "Це бот доступу до курсу самомасажу.\n\n"
-            "Натисніть кнопку <b>“Оплатити курс”</b>\n"
-            "<b>Після оплати Ви автоматично отримаєте особистий доступ у приватний канал❤️</b>"
+            "Тут ви можете:\n"
+            "• придбати курс для себе\n"
+            "• або зробити корисний подарунок близькій людині 🎁\n\n"
+            "Оберіть потрібний варіант нижче, щоб оплатити курс і отримати доступ "
+            "у приватний канал з відеоуроками ❤️👇"
         )
 
     await update.message.reply_text(txt, reply_markup=keyboard, parse_mode="HTML")
@@ -548,6 +619,45 @@ async def user_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 telegram_app.add_handler(MessageHandler(filters.ALL, user_messages))
+
+
+# ===================== GIFT CALLBACK =====================
+
+async def gift_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+    gift_code = await create_gift(user.id)
+
+    await query.message.reply_text(
+        "🎁 Дякуємо за покупку подарунка!\n\n"
+        "Ви придбали курс\n"
+        "«Сам Собі Масажист»\n"
+        "для близької людини 💙\n\n"
+        "⛔️ Будь ласка, не натискайте кнопку доступу самостійно.\n\n"
+        "👉 Перешліть наступне повідомлення людині,\n"
+        "якій хочете зробити подарунок."
+    )
+
+    await query.message.reply_text(
+        "🎁 Вам зробили подарунок!\n\n"
+        "Для вас придбали курс\n"
+        "«Сам Собі Масажист» 💆‍♀️\n\n"
+        "Натисніть кнопку нижче,\n"
+        "щоб отримати доступ до курсу 👇",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "🔓 Отримати доступ",
+                url=f"https://t.me/{BOT_USERNAME}?start=gift_{gift_code}"
+            )]
+        ])
+    )
+
+
+telegram_app.add_handler(
+    CallbackQueryHandler(gift_callback, pattern="^buy_gift$")
+)
 
 
 # ===================== PAYMENT SUCCESS PAGE =====================
