@@ -84,6 +84,7 @@ async def init_db():
             last_activity INTEGER,
             has_access INTEGER DEFAULT 0,
             awaiting_payment INTEGER DEFAULT 0,
+            awaiting_payment_type TEXT DEFAULT NULL,
             support_mode INTEGER DEFAULT 0
         )
     """)
@@ -92,6 +93,7 @@ async def init_db():
     for stmt in [
         "ALTER TABLE users ADD COLUMN has_access INTEGER DEFAULT 0",
         "ALTER TABLE users ADD COLUMN awaiting_payment INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN awaiting_payment_type TEXT DEFAULT NULL",
         "ALTER TABLE users ADD COLUMN support_mode INTEGER DEFAULT 0",
     ]:
         try:
@@ -142,8 +144,8 @@ async def upsert_user(user):
 
     await conn.execute("""
         INSERT OR IGNORE INTO users
-        (telegram_id, username, first_name, joined_at, last_activity, has_access, awaiting_payment, support_mode)
-        VALUES (?, ?, ?, ?, ?, 0, 0, 0)
+        (telegram_id, username, first_name, joined_at, last_activity, has_access, awaiting_payment, awaiting_payment_type, support_mode)
+        VALUES (?, ?, ?, ?, ?, 0, 0, NULL, 0)
     """, (user.id, user.username, user.first_name, now, now))
 
     await conn.execute("""
@@ -181,6 +183,7 @@ async def create_invite_link(user_id: int) -> str:
 
     await conn.commit()
     return invite.invite_link
+
 
 async def create_gift(buyer_id: int) -> str:
     conn = await get_db()
