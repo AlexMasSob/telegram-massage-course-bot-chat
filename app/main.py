@@ -39,7 +39,15 @@ CURRENCY = os.getenv("CURRENCY", "UAH")
 
 if not BOT_TOKEN or not WEBHOOK_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN or WEBHOOK_TOKEN")
+    
+# ===================== HELPERS =====================
 
+def support_url() -> str:
+    cid = str(SUPPORT_CHAT_ID)
+    if cid.startswith("-100"):
+        cid = cid[4:]
+    return f"https://t.me/c/{cid}"
+    
 # ===================== APP =====================
 
 app = FastAPI()
