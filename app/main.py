@@ -302,19 +302,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not row or row["awaiting_payment"] == 0:
             await update.message.reply_text(
                 "Я не бачу активної оплати для Вашого акаунту.\n\n"
-                "Якщо Ви оплатили, але не отримали доступ — натисніть 🆘 <b>Підтримка</b> нижче 🙏",
+                "Якщо Ви оплатили, але не отримали доступ — натисніть ✉️ <b>Підтримка</b> нижче 🙏",
                 parse_mode="HTML"
             )
             return
 
         # захист від дублювання
-        if row["has_access"] == 1:
-            await update.message.reply_text(
-                "✅ У Вас вже є доступ.\n\n"
-                "Якщо загубили посилання — натисніть 🆘 <b>Підтримка</b> → «Загубив посилання».",
-                parse_mode="HTML"
-            )
-            return
+        if row["has_access"] == 1 and row["awaiting_payment_type"] == "self":
+    await update.message.reply_text(
+        "✅ У Вас вже є доступ.\n\n"
+        "Якщо загубили посилання — натисніть ✉️ <b>Підтримка</b> → «Загубив посилання».",
+        parse_mode="HTML"
+    )
+    return
 
         now = int(time.time())
 
@@ -418,7 +418,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Оплатити курс для себе", url=PAYMENT_BUTTON_URL)],
         [InlineKeyboardButton("🎁 Купити курс в подарунок", callback_data="buy_gift")],
-        [InlineKeyboardButton("✉️ Написати в підтримку", callback_data="support:menu")]
+        [InlineKeyboardButton("✉️ Написати в підтримку", callback_data="support:menu")]к
     ])
 
     if args and args[0] == "site":
