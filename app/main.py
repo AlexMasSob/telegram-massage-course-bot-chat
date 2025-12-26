@@ -309,12 +309,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # захист від дублювання
         if row["has_access"] == 1 and row["awaiting_payment_type"] == "self":
-    await update.message.reply_text(
-        "✅ У Вас вже є доступ.\n\n"
-        "Якщо загубили посилання — натисніть ✉️ <b>Підтримка</b> → «Загубив посилання».",
-        parse_mode="HTML"
-    )
-    return
+            await update.message.reply_text(
+                "✅ У Вас вже є доступ.\n\n"
+                "Якщо загубили посилання — натисніть ✉️ <b>Підтримка</b> → «Загубив посилання».",
+                parse_mode="HTML"
+            )
+            return
 
         now = int(time.time())
 
