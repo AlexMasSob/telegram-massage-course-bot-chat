@@ -249,8 +249,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === RETURN FROM PAYMENT ===
     if args and args[0].startswith("gift_"):
-    gift_code = args[0].replace("gift_", "")
-    conn = await get_db()
+        gift_code = args[0].replace("gift_", "")
+        conn = await get_db()
 
     cur = await conn.execute("""
         SELECT id, is_used FROM gifts WHERE gift_code = ?
