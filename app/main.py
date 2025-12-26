@@ -240,9 +240,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await conn.commit()
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Оплатити курс", url=PAYMENT_BUTTON_URL)],
-        [InlineKeyboardButton("🆘 Написати в підтримку", url=f"https://t.me/{BOT_USERNAME}")]
-    ])
+    [InlineKeyboardButton("💳 Оплатити курс", url=PAYMENT_BUTTON_URL)],
+    [InlineKeyboardButton("🆘 Написати в підтримку", url=support_url())]
+])
 
     await update.message.reply_text(
         "Вітаю! 👋\n\n"
