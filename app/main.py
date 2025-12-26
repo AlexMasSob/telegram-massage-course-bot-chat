@@ -248,48 +248,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await set_support_mode(user.id, 0)
 
    # === RETURN FROM GIFT LINK ===
-    if args and args[0].startswith("gift_"):
-        gift_code = args[0].replace("gift_", "")
-        conn = await get_db()
+   if args and args[0].startswith("gift_"):
+       gift_code = args[0].replace("gift_", "")
+       conn = await get_db()
 
-    cur = await conn.execute("""
-        SELECT id, is_used FROM gifts WHERE gift_code = ?
-    """, (gift_code,))
-    gift = await cur.fetchone()
+       cur = await conn.execute("""
+           SELECT id, is_used FROM gifts WHERE gift_code = ?
+       """, (gift_code,))
+       gift = await cur.fetchone()
 
-    if not gift:
-        await update.message.reply_text("❌ Цей подарунок недійсний.")
-        return
+       if not gift:
+           await update.message.reply_text("❌ Цей подарунок недійсний.")
+           return
 
-    if gift["is_used"] == 1:
-        await update.message.reply_text("⚠️ Цей подарунок вже був використаний.")
-        return
+       if gift["is_used"] == 1:
+           await update.message.reply_text("⚠️ Цей подарунок вже був використаний.")
+           return
 
-    # видаємо доступ
-    link = await create_invite_link(user.id)
-    now = int(time.time())
+       link = await create_invite_link(user.id)
+       now = int(time.time())
 
-    await conn.execute("""
-        UPDATE gifts SET is_used = 1, used_at = ?
-        WHERE id = ?
-    """, (now, gift["id"]))
+       await conn.execute("""
+           UPDATE gifts SET is_used = 1, used_at = ?
+           WHERE id = ?
+       """, (now, gift["id"]))
 
-    await conn.execute("""
-        UPDATE users SET has_access = 1, last_activity = ?
-        WHERE telegram_id = ?
-    """, (now, user.id))
+       await conn.execute("""
+           UPDATE users SET has_access = 1 WHERE telegram_id = ?
+       """, (user.id,))
 
-    await conn.commit()
+       await conn.commit()
 
-    await update.message.reply_text(
-        "🎁 <b>Вам зробили подарунок!</b>\n\n"
-        "Ви отримали доступ до курсу\n"
-        "<b>«Сам Собі Масажист»</b> 💙\n\n"
-        "🔑 Ось ваш персональний доступ:\n"
-        f"{link}",
-        parse_mode="HTML"
-    )
-    return
+       await update.message.reply_text(
+           "🎉 <b>Подарунок активовано!</b>\n\n"
+           "Ось ваш доступ до курсу:\n"
+           f"{link}",
+           parse_mode="HTML"
+       )
+       return
     
     if args and args[0] == "paid":
         row = await get_user_row(user.id)
