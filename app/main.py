@@ -247,13 +247,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # якщо користувач був у режимі "інше питання" — вимикаємо при /start
     await set_support_mode(user.id, 0)
 
-    # === RETURN FROM GIFT LINK ===
+    # ==================================================
+    # === RETURN FROM GIFT LINK (отримувач подарунка) ===
+    # ==================================================
     if args and args[0].startswith("gift_"):
         gift_code = args[0].replace("gift_", "")
 
-        cur = await conn.execute("""
-            SELECT id, is_used FROM gifts WHERE gift_code = ?
-        """, (gift_code,))
+        cur = await conn.execute(
+            "SELECT id, is_used FROM gifts WHERE gift_code = ?",
+            (gift_code,)
+        )
         gift = await cur.fetchone()
 
         if not gift:
@@ -267,14 +270,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link = await create_invite_link(user.id)
         now = int(time.time())
 
-        await conn.execute("""
-            UPDATE gifts SET is_used = 1, used_at = ?
-            WHERE id = ?
-        """, (now, gift["id"]))
+        await conn.execute(
+            "UPDATE gifts SET is_used = 1, used_at = ? WHERE id = ?",
+            (now, gift["id"])
+        )
 
-        await conn.execute("""
-            UPDATE users SET has_access = 1 WHERE telegram_id = ?
-        """, (user.id,))
+        await conn.execute(
+            "UPDATE users SET has_access = 1 WHERE telegram_id = ?",
+            (user.id,)
+        )
 
         await conn.commit()
 
@@ -286,7 +290,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # === RETURN FROM PAYMENT ===
+    # ======================================
+    # === RETURN FROM PAYMENT (WayForPay) ===
+    # ======================================
     if args and args[0] == "paid":
         row = await get_user_row(user.id)
 
@@ -298,6 +304,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # захист від дублювання
         if row["has_access"] == 1:
             await update.message.reply_text(
                 "✅ У Вас вже є доступ.\n\n"
@@ -308,18 +315,76 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         now = int(time.time())
 
-        await conn.execute("""
+        # фіксуємо покупку (для /stats)
+        await conn.execute(
+            """
             INSERT INTO purchases
             (telegram_id, product_id, amount, currency, status, created_at, paid_at)
             VALUES (?, ?, ?, ?, 'approved', ?, ?)
-        """, (user.id, PRODUCT_ID, AMOUNT, CURRENCY, now, now))
+            """,
+            (user.id, PRODUCT_ID, AMOUNT, CURRENCY, now, now)
+        )
 
-        await conn.execute("""
+        # ==== GIFT FLOW: створюємо подарунок ТІЛЬКИ після paid ====
+        if row["awaiting_payment_type"] == "gift":
+            gift_code = await create_gift(user.id)
+
+            await conn.execute(
+                """
+                UPDATE users
+                SET awaiting_payment = 0,
+                    awaiting_payment_type = NULL,
+                    last_activity = ?
+                WHERE telegram_id = ?
+                """,
+                (now, user.id)
+            )
+            await conn.commit()
+
+            # повідомлення №1 — покупцю
+            await update.message.reply_text(
+                "🎁 <b>Дякуємо за покупку подарунка!</b>\n\n"
+                "Ви придбали курс\n"
+                "<b>«Сам Собі Масажист»</b>\n"
+                "для близької людини 💙\n\n"
+                "⛔️ Будь ласка, не натискайте кнопку доступу самостійно.\n\n"
+                "👉 Перешліть наступне повідомлення людині, якій хочете зробити подарунок.",
+                parse_mode="HTML"
+            )
+
+            # повідомлення №2 — для пересилання (ТВІЙ ТЕКСТ)
+            await update.message.reply_text(
+                "🎁 <b>Вам зробили подарунок!</b>\n\n"
+                "Для вас придбали курс\n"
+                "«Сам Собі Масажист» 💆‍♀️\n\n"
+                "Це курс, який допоможе:\n"
+                "• зняти напругу\n"
+                "• краще відчувати своє тіло\n"
+                "• піклуватися про себе щодня\n\n"
+                "Натисніть кнопку нижче,\n"
+                "щоб отримати доступ до курсу 👇",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🔓 Отримати доступ",
+                        url=f"https://t.me/{BOT_USERNAME}?start=gift_{gift_code}"
+                    )]
+                ]),
+                parse_mode="HTML"
+            )
+            return
+
+        # ==== SELF FLOW: доступ собі ====
+        await conn.execute(
+            """
             UPDATE users
-            SET has_access = 1, awaiting_payment = 0, last_activity = ?
+            SET has_access = 1,
+                awaiting_payment = 0,
+                awaiting_payment_type = NULL,
+                last_activity = ?
             WHERE telegram_id = ?
-        """, (now, user.id))
-
+            """,
+            (now, user.id)
+        )
         await conn.commit()
 
         link = await create_invite_link(user.id)
@@ -332,9 +397,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # === NORMAL START ===
+    # ======================
+    # === NORMAL START ====
+    # ======================
     await conn.execute(
-        "UPDATE users SET awaiting_payment = 1, last_activity = ? WHERE telegram_id = ?",
+        """
+        UPDATE users
+        SET awaiting_payment = 1,
+            awaiting_payment_type = 'self',
+            last_activity = ?
+        WHERE telegram_id = ?
+        """,
         (int(time.time()), user.id)
     )
     await conn.commit()
@@ -628,30 +701,36 @@ async def gift_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     user = query.from_user
-    gift_code = await create_gift(user.id)
+    await upsert_user(user)
 
-    await query.message.reply_text(
-        "🎁 Дякуємо за покупку подарунка!\n\n"
-        "Ви придбали курс\n"
-        "«Сам Собі Масажист»\n"
-        "для близької людини 💙\n\n"
-        "⛔️ Будь ласка, не натискайте кнопку доступу самостійно.\n\n"
-        "👉 Перешліть наступне повідомлення людині,\n"
-        "якій хочете зробити подарунок."
+    conn = await get_db()
+
+    # 🔐 позначаємо, що користувач іде на оплату ПОДАРУНКА
+    await conn.execute(
+        """
+        UPDATE users
+        SET awaiting_payment = 1,
+            awaiting_payment_type = 'gift',
+            last_activity = ?
+        WHERE telegram_id = ?
+        """,
+        (int(time.time()), user.id)
     )
+    await conn.commit()
 
+    # 👉 просто відправляємо на WayForPay
     await query.message.reply_text(
-        "🎁 Вам зробили подарунок!\n\n"
-        "Для вас придбали курс\n"
-        "«Сам Собі Масажист» 💆‍♀️\n\n"
-        "Натисніть кнопку нижче,\n"
-        "щоб отримати доступ до курсу 👇",
+        "🎁 <b>Подарунок — чудовий вибір!</b>\n\n"
+        "Зараз Ви перейдете на захищену сторінку оплати.\n\n"
+        "Після успішної оплати я підготую повідомлення,\n"
+        "яке Ви зможете переслати людині, для якої купуєте подарунок 💙",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(
-                "🔓 Отримати доступ",
-                url=f"https://t.me/{BOT_USERNAME}?start=gift_{gift_code}"
+                "💳 Перейти до оплати подарунка",
+                url=PAYMENT_BUTTON_URL
             )]
-        ])
+        ]),
+        parse_mode="HTML"
     )
 
 
