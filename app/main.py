@@ -418,7 +418,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Оплатити курс для себе", url=PAYMENT_BUTTON_URL)],
         [InlineKeyboardButton("🎁 Купити курс в подарунок", callback_data="buy_gift")],
-        [InlineKeyboardButton("✉️ Написати в підтримку", callback_data="support:menu")]к
+        [InlineKeyboardButton("✉️ Написати в підтримку", callback_data="support:menu")]
     ])
 
     if args and args[0] == "site":
