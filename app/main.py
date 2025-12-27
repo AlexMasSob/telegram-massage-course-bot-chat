@@ -673,6 +673,10 @@ async def user_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton(
                         "✅ Видати доступ",
                         callback_data=f"admin:grant:{user.id}"
+                    ),
+                    InlineKeyboardButton(
+                        "🎁 Видати подарунок",
+                        callback_data=f"admin:gift:{user.id}"
                     )
                 ]
             ]),
@@ -800,6 +804,58 @@ async def admin_grant_access_cb(update: Update, context: ContextTypes.DEFAULT_TY
 
 telegram_app.add_handler(
     CallbackQueryHandler(admin_grant_access_cb, pattern=r"^admin:grant:")
+)
+
+
+# ===================== BUTTON SUPPORT GIFT =====================
+
+async def admin_grant_gift_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    # 🔐 тільки адмін
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("⛔️ Немає доступу", show_alert=True)
+        return
+
+    buyer_id = int(query.data.split(":")[2])
+
+    # створюємо подарунок
+    gift_code = await create_gift(buyer_id)
+
+    # повідомлення №1 — адмінам (пояснення)
+    await query.message.reply_text(
+        "🎁 <b>Подарунок створено вручну</b>\n\n"
+        "Скопіюйте або перешліть повідомлення нижче людині,\n"
+        "яка має отримати доступ 👇",
+        parse_mode="HTML"
+    )
+
+    # повідомлення №2 — ГОТОВЕ ДЛЯ ПЕРЕСИЛАННЯ (ВАЖЛИВО)
+    await query.message.reply_text(
+        "🎁 <b>Вам зробили подарунок!</b>\n\n"
+        "Для вас придбали курс\n"
+        "«Сам Собі Масажист» 💆‍♀️\n\n"
+        "Це курс, який допоможе:\n"
+        "• зняти напругу\n"
+        "• краще відчувати своє тіло\n"
+        "• піклуватися про себе щодня\n\n"
+        "Натисніть кнопку нижче,\n"
+        "щоб отримати доступ до курсу 👇",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔓 Отримати доступ",
+                    url=f"https://t.me/{BOT_USERNAME}?start=gift_{gift_code}"
+                )
+            ]
+        ]),
+        parse_mode="HTML"
+    )
+
+
+telegram_app.add_handler(
+    CallbackQueryHandler(admin_grant_gift_cb, pattern=r"^admin:gift:")
 )
 
 
