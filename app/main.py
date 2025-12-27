@@ -660,12 +660,22 @@ async def user_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await telegram_app.bot.send_message(
-            SUPPORT_CHAT_ID,
-            "💬 <b>Нове звернення в підтримку</b>\n\n"
-            f"👤 ID: <code>{user.id}</code>\n"
-            f"🔗 Username: @{user.username if user.username else 'немає'}\n"
-            f"🙍‍♂️ Ім'я: <b>{user.first_name}</b>\n\n"
-            f"📝 Текст:\n<code>{text}</code>",
+            chat_id=SUPPORT_CHAT_ID,
+            text=(
+                "💬 <b>Нове звернення в підтримку</b>\n\n"
+                f"👤 ID: <code>{user.id}</code>\n"
+                f"🔗 Username: @{user.username if user.username else 'немає'}\n"
+                f"🙍‍♀️ Ім'я: <b>{user.first_name}</b>\n\n"
+                f"📝 Текст:\n<code>{text}</code>"
+            ),
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✅ Видати доступ",
+                        callback_data=f"admin:grant:{user.id}"
+                    )
+                ]
+            ]),
             parse_mode="HTML"
         )
 
@@ -739,6 +749,57 @@ async def gift_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 telegram_app.add_handler(
     CallbackQueryHandler(gift_callback, pattern="^buy_gift$")
+)
+
+
+# ===================== BUTTON SUPPORT =====================
+
+async def admin_grant_access_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    # 🔐 тільки адмін
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("⛔️ Немає доступу", show_alert=True)
+        return
+
+    user_id = int(query.data.split(":")[2])
+    conn = await get_db()
+
+    await conn.execute(
+        """
+        UPDATE users
+        SET has_access = 1,
+            awaiting_payment = 0,
+            awaiting_payment_type = NULL
+        WHERE telegram_id = ?
+        """,
+        (user_id,)
+    )
+    await conn.commit()
+
+    link = await create_invite_link(user_id)
+
+    # повідомлення користувачу
+    await telegram_app.bot.send_message(
+        chat_id=user_id,
+        text=(
+            "🎉 <b>Доступ активовано!</b>\n\n"
+            "Ось ваше персональне посилання до курсу:\n"
+            f"{link}"
+        ),
+        parse_mode="HTML"
+    )
+
+    # підтвердження в чат підтримки
+    await query.message.reply_text(
+        f"✅ Доступ видано користувачу <code>{user_id}</code>",
+        parse_mode="HTML"
+    )
+
+
+telegram_app.add_handler(
+    CallbackQueryHandler(admin_grant_access_cb, pattern=r"^admin:grant:")
 )
 
 
